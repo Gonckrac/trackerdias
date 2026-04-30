@@ -3,6 +3,8 @@ import { loadData, saveData } from "./supabase.js";
 
 const DAYS = ["Dom","Lun","Mar","Mié","Jue","Vie","Sáb"];
 const DAY_FULL = ["Domingo","Lunes","Martes","Miércoles","Jueves","Viernes","Sábado"];
+const SUBJECTS = ["Cálculo","Química","Complementos","Informática","Filosofía","Intro Ing."];
+const MONTH_NAMES = ["Enero","Febrero","Marzo","Abril","Mayo","Junio","Julio","Agosto","Septiembre","Octubre","Noviembre","Diciembre"];
 
 const CAT = {
   clase:   { label: "Clase",   color: "#3b82f6", bg: "rgba(59,130,246,0.12)", emoji: "📚" },
@@ -80,7 +82,7 @@ function fmtTimer(s) { return `${String(Math.floor(s/60)).padStart(2,"0")}:${Str
 function getTotalSessions(d) { return schedule[d].filter(b => b.cat === "estudio").reduce((s, b) => s + (b.sessions || 0), 0); }
 
 const VIEW = { RUTINA: 0, TIMER: 1, STATS: 2 };
-const DEFAULT_DATA = { days: {}, streak: 0, lastStudy: null, totalSessions: 0, checked: {} };
+const DEFAULT_DATA = { days: {}, streak: 0, lastStudy: null, totalSessions: 0, checked: {}, subjectSessions: {}, parciales: [] };
 
 export default function App() {
   const [view, setView] = useState(VIEW.RUTINA);
@@ -91,6 +93,8 @@ export default function App() {
   const [timerActive, setTimerActive] = useState(false);
   const [timerPhase, setTimerPhase] = useState("study");
   const [timerSecs, setTimerSecs] = useState(STUDY_ON * 60);
+  const [timerSubject, setTimerSubject] = useState("Cálculo");
+  const [parcialesForm, setParcialesForm] = useState({ materia: "Cálculo", fecha: "" });
   const intervalRef = useRef(null);
 
   useEffect(() => { loadData().then(d => { setData(d ? { ...DEFAULT_DATA, ...d } : DEFAULT_DATA); setLoading(false); }); }, []);
@@ -132,12 +136,17 @@ export default function App() {
 
   const completeSession = useCallback(() => {
     if (!data) return;
-    const key = todayKey(); const target = getTotalSessions(DAY_FULL[dayOfWeek()]);
-    const dd = { ...(data.days[key] || { completed: 0, target }) }; dd.completed += 1; dd.target = target;
-    let streak = data.streak || 0; const last = data.lastStudy;
+    const key = todayKey();
+    const target = getTotalSessions(DAY_FULL[dayOfWeek()]);
+    const dd = { ...(data.days[key] || { completed: 0, target }) };
+    dd.completed += 1; dd.target = target;
+    let streak = data.streak || 0;
+    const last = data.lastStudy;
     if (last) { const diff = Math.floor((new Date(key) - new Date(last)) / 86400000); if (diff === 1) streak += 1; else if (diff > 1) streak = 1; } else streak = 1;
-    persist({ ...data, days: { ...data.days, [key]: dd }, streak, lastStudy: key, totalSessions: (data.totalSessions || 0) + 1 });
-  }, [data, persist]);
+    const prevSubjDay = data.subjectSessions?.[key] || {};
+    const newSubjDay = { ...prevSubjDay, [timerSubject]: (prevSubjDay[timerSubject] || 0) + 1 };
+    persist({ ...data, days: { ...data.days, [key]: dd }, streak, lastStudy: key, totalSessions: (data.totalSessions || 0) + 1, subjectSessions: { ...data.subjectSessions, [key]: newSubjDay } });
+  }, [data, persist, timerSubject]);
 
   useEffect(() => {
     if (timerSecs === 0 && timerActive) {
@@ -160,6 +169,18 @@ export default function App() {
     persist({ ...data, days: { ...data.days, [key]: { completed: target, target } }, streak, lastStudy: key, totalSessions: (data.totalSessions || 0) + Math.max(0, target - prev), checked: { ...data.checked, [key]: { ...(data.checked?.[key] || {}), ...allChecked } } });
   }, [data, persist]);
 
+  const addParcial = useCallback(() => {
+    if (!parcialesForm.fecha) return;
+    const newParciales = [...(data.parciales || []), { materia: parcialesForm.materia, fecha: parcialesForm.fecha }];
+    persist({ ...data, parciales: newParciales });
+    setParcialesForm(f => ({ ...f, fecha: "" }));
+  }, [data, persist, parcialesForm]);
+
+  const removeParcial = useCallback((index) => {
+    const newParciales = (data.parciales || []).filter((_, i) => i !== index);
+    persist({ ...data, parciales: newParciales });
+  }, [data, persist]);
+
   if (loading) return <div style={{ minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", background: "#0c1222", color: "#64748b", fontFamily: "'DM Sans',sans-serif" }}>Cargando...</div>;
 
   const todayDayName = DAY_FULL[dayOfWeek()];
@@ -171,6 +192,25 @@ export default function App() {
   const navItems = [{ id: VIEW.RUTINA, label: "Rutina", icon: "📋" }, { id: VIEW.TIMER, label: "Timer", icon: "⏱️" }, { id: VIEW.STATS, label: "Stats", icon: "📊" }];
   const isToday = selDay === dayOfWeek();
   const dayProgress = isToday ? getDayProgress() : null;
+
+  // --- Stats computations ---
+  const weekSubjectTotals = {};
+  SUBJECTS.forEach(s => { weekSubjectTotals[s] = 0; });
+  for (let i = 0; i < 7; i++) {
+    const d = new Date(); d.setDate(d.getDate() - i);
+    const key = d.toISOString().slice(0, 10);
+    const daySubs = data.subjectSessions?.[key] || {};
+    SUBJECTS.forEach(s => { weekSubjectTotals[s] += daySubs[s] || 0; });
+  }
+  const maxSubjSessions = Math.max(1, ...SUBJECTS.map(s => weekSubjectTotals[s]));
+
+  const now = new Date();
+  const heatYear = now.getFullYear();
+  const heatMonth = now.getMonth();
+  const daysInMonth = new Date(heatYear, heatMonth + 1, 0).getDate();
+  const firstDayOfMonth = new Date(heatYear, heatMonth, 1).getDay();
+
+  const sortedParciales = [...(data.parciales || [])].sort((a, b) => new Date(a.fecha) - new Date(b.fecha));
 
   return (
     <div style={{ fontFamily: "'DM Sans',sans-serif", background: "linear-gradient(150deg,#0c1222,#162032)", minHeight: "100vh", color: "#e2e8f0", paddingBottom: 80 }}>
@@ -256,7 +296,26 @@ export default function App() {
         {view === VIEW.TIMER && (
           <div style={{ display: "flex", flexDirection: "column", alignItems: "center", paddingTop: 20 }}>
             <p style={{ fontSize: 13, color: "#64748b", marginBottom: 4 }}>{todayDayName} — {todayTarget > 0 ? `${todayTarget} sesiones hoy` : "Sin estudio hoy"}</p>
-            <p style={{ fontSize: 12, color: timerPhase === "study" ? "#10b981" : "#a78bfa", fontWeight: 600, marginBottom: 20 }}>{timerPhase === "study" ? "🎯 Sesión de estudio (1:05)" : "☕ Descanso (10 min)"}</p>
+            <p style={{ fontSize: 12, color: timerPhase === "study" ? "#10b981" : "#a78bfa", fontWeight: 600, marginBottom: 16 }}>{timerPhase === "study" ? "🎯 Sesión de estudio (1:05)" : "☕ Descanso (10 min)"}</p>
+
+            {timerPhase === "study" && (
+              <div style={{ width: "100%", marginBottom: 20 }}>
+                <p style={{ fontSize: 11, color: "#475569", margin: "0 0 8px", textAlign: "center" }}>📖 Estudiando para</p>
+                <div style={{ display: "flex", gap: 6, flexWrap: "wrap", justifyContent: "center" }}>
+                  {SUBJECTS.map(s => (
+                    <button key={s} onClick={() => setTimerSubject(s)} style={{
+                      padding: "5px 11px", borderRadius: 20,
+                      border: timerSubject === s ? "1px solid #3b82f6" : "1px solid rgba(255,255,255,0.1)",
+                      background: timerSubject === s ? "rgba(59,130,246,0.2)" : "rgba(255,255,255,0.04)",
+                      color: timerSubject === s ? "#60a5fa" : "#64748b",
+                      fontSize: 11, fontWeight: timerSubject === s ? 700 : 500,
+                      cursor: "pointer", fontFamily: "'DM Sans',sans-serif", transition: "all 0.15s ease",
+                    }}>{s}</button>
+                  ))}
+                </div>
+              </div>
+            )}
+
             <div style={{ position: "relative", width: 220, height: 220, marginBottom: 24 }}>
               <svg width="220" height="220" viewBox="0 0 220 220" style={{ transform: "rotate(-90deg)" }}>
                 <circle cx="110" cy="110" r="96" fill="none" stroke="rgba(255,255,255,0.05)" strokeWidth="8" />
@@ -265,6 +324,7 @@ export default function App() {
               <div style={{ position: "absolute", inset: 0, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center" }}>
                 <span style={{ fontFamily: "'DM Mono',monospace", fontSize: 44, fontWeight: 500, color: "#f1f5f9", letterSpacing: "-2px" }}>{fmtTimer(timerSecs)}</span>
                 <span style={{ fontSize: 11, color: "#475569", marginTop: 4 }}>{todayD.completed}/{todayTarget} completadas</span>
+                {timerPhase === "study" && <span style={{ fontSize: 10, color: "#3b82f6", marginTop: 2, fontWeight: 600 }}>{timerSubject}</span>}
               </div>
             </div>
             <div style={{ display: "flex", gap: 12, marginBottom: 24 }}>
@@ -287,6 +347,8 @@ export default function App() {
 
         {view === VIEW.STATS && (
           <div style={{ paddingTop: 8 }}>
+
+            {/* KPI cards */}
             <div style={{ display: "flex", gap: 8, marginBottom: 20 }}>
               {[{ value: `${data.streak || 0}`, sub: "días racha", color: "#f59e0b", icon: "🔥" }, { value: `${data.totalSessions || 0}`, sub: "sesiones total", color: "#3b82f6", icon: "📚" }, { value: `${studyPct}%`, sub: "estudio hoy", color: studyPct >= 100 ? "#10b981" : "#60a5fa", icon: studyPct >= 100 ? "✅" : "📈" }].map((s, i) => (
                 <div key={i} style={{ flex: 1, background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.06)", borderRadius: 12, padding: "14px 10px", textAlign: "center" }}>
@@ -296,6 +358,31 @@ export default function App() {
                 </div>
               ))}
             </div>
+
+            {/* Materias esta semana */}
+            <h3 style={{ fontSize: 14, fontWeight: 700, margin: "0 0 12px", color: "#94a3b8" }}>Materias esta semana</h3>
+            <div style={{ display: "flex", flexDirection: "column", gap: 7, marginBottom: 24 }}>
+              {SUBJECTS.map(s => {
+                const count = weekSubjectTotals[s];
+                const barPct = (count / maxSubjSessions) * 100;
+                return (
+                  <div key={s} style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                    <span style={{ width: 88, fontSize: 11, color: count > 0 ? "#94a3b8" : "#334155", flexShrink: 0, textAlign: "right" }}>{s}</span>
+                    <div style={{ flex: 1, height: 20, background: "rgba(255,255,255,0.04)", borderRadius: 4, overflow: "hidden" }}>
+                      <div style={{ height: "100%", width: `${barPct}%`, background: count > 0 ? "linear-gradient(90deg,#3b82f6,#818cf8)" : "transparent", borderRadius: 4, display: "flex", alignItems: "center", paddingLeft: count > 0 ? 8 : 0, transition: "width 0.4s ease", minWidth: count > 0 ? 32 : 0 }}>
+                        {count > 0 && <span style={{ fontSize: 10, fontWeight: 700, color: "#fff", whiteSpace: "nowrap" }}>{count}</span>}
+                      </div>
+                    </div>
+                    <span style={{ width: 24, fontSize: 11, color: count > 0 ? "#60a5fa" : "#1e293b", textAlign: "right", fontWeight: 700, fontFamily: "'DM Mono',monospace" }}>{count || ""}</span>
+                  </div>
+                );
+              })}
+              {SUBJECTS.every(s => weekSubjectTotals[s] === 0) && (
+                <p style={{ fontSize: 12, color: "#334155", textAlign: "center", margin: "4px 0" }}>Sin sesiones registradas esta semana</p>
+              )}
+            </div>
+
+            {/* Últimos 7 días */}
             <h3 style={{ fontSize: 14, fontWeight: 700, margin: "0 0 12px", color: "#94a3b8" }}>Últimos 7 días</h3>
             <div style={{ display: "flex", gap: 6, marginBottom: 24 }}>
               {Array.from({ length: 7 }).map((_, i) => {
@@ -311,6 +398,117 @@ export default function App() {
                 </div>);
               })}
             </div>
+
+            {/* Heatmap mensual */}
+            <h3 style={{ fontSize: 14, fontWeight: 700, margin: "0 0 12px", color: "#94a3b8" }}>Actividad — {MONTH_NAMES[heatMonth]}</h3>
+            <div style={{ background: "rgba(255,255,255,0.02)", border: "1px solid rgba(255,255,255,0.05)", borderRadius: 12, padding: "14px 12px", marginBottom: 24 }}>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(7,1fr)", gap: 3, marginBottom: 4 }}>
+                {["D","L","M","X","J","V","S"].map(d => (
+                  <div key={d} style={{ textAlign: "center", fontSize: 9, color: "#334155", paddingBottom: 2 }}>{d}</div>
+                ))}
+              </div>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(7,1fr)", gap: 3 }}>
+                {Array.from({ length: firstDayOfMonth }).map((_, i) => (
+                  <div key={`e${i}`} />
+                ))}
+                {Array.from({ length: daysInMonth }).map((_, i) => {
+                  const day = i + 1;
+                  const mm = String(heatMonth + 1).padStart(2, "0");
+                  const dd = String(day).padStart(2, "0");
+                  const dateKey = `${heatYear}-${mm}-${dd}`;
+                  const cellDate = new Date(heatYear, heatMonth, day);
+                  const isFuture = cellDate > now;
+                  const isTodayCell = dateKey === todayKey();
+                  const dayIdx = cellDate.getDay();
+                  const target = getTotalSessions(DAY_FULL[dayIdx]);
+                  const completed = data.days?.[dateKey]?.completed || 0;
+                  const pct = target > 0 ? Math.min(100, Math.round((completed / target) * 100)) : (completed > 0 ? 100 : 0);
+
+                  let bg;
+                  if (isFuture) bg = "rgba(255,255,255,0.02)";
+                  else if (target === 0 && completed === 0) bg = "rgba(255,255,255,0.05)";
+                  else if (pct === 0) bg = "rgba(255,255,255,0.07)";
+                  else if (pct < 50) bg = "rgba(16,185,129,0.28)";
+                  else if (pct < 100) bg = "rgba(16,185,129,0.58)";
+                  else bg = "#10b981";
+
+                  return (
+                    <div key={day} title={isFuture ? "" : `${day}/${heatMonth + 1}: ${completed}/${target} sesiones`} style={{
+                      aspectRatio: "1", borderRadius: 3,
+                      background: bg,
+                      border: isTodayCell ? "1px solid #60a5fa" : "1px solid transparent",
+                      position: "relative",
+                    }}>
+                      {isTodayCell && <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 7, color: "rgba(255,255,255,0.6)", fontWeight: 700 }}>{day}</div>}
+                    </div>
+                  );
+                })}
+              </div>
+              <div style={{ display: "flex", alignItems: "center", gap: 5, marginTop: 10, justifyContent: "flex-end" }}>
+                <span style={{ fontSize: 9, color: "#334155" }}>menos</span>
+                {["rgba(255,255,255,0.07)","rgba(16,185,129,0.28)","rgba(16,185,129,0.58)","#10b981"].map((c, i) => (
+                  <div key={i} style={{ width: 11, height: 11, borderRadius: 2, background: c }} />
+                ))}
+                <span style={{ fontSize: 9, color: "#334155" }}>más</span>
+              </div>
+            </div>
+
+            {/* Parciales */}
+            <h3 style={{ fontSize: 14, fontWeight: 700, margin: "0 0 12px", color: "#94a3b8" }}>Parciales</h3>
+            <div style={{ display: "flex", gap: 6, marginBottom: 10 }}>
+              <select
+                value={parcialesForm.materia}
+                onChange={e => setParcialesForm(f => ({ ...f, materia: e.target.value }))}
+                style={{ flex: 1, background: "rgba(255,255,255,0.06)", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 8, color: "#e2e8f0", fontSize: 12, padding: "8px 10px", fontFamily: "'DM Sans',sans-serif", cursor: "pointer", outline: "none" }}
+              >
+                {SUBJECTS.map(s => <option key={s} value={s} style={{ background: "#0f1923" }}>{s}</option>)}
+              </select>
+              <input
+                type="date"
+                value={parcialesForm.fecha}
+                onChange={e => setParcialesForm(f => ({ ...f, fecha: e.target.value }))}
+                style={{ flex: 1, background: "rgba(255,255,255,0.06)", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 8, color: "#e2e8f0", fontSize: 12, padding: "8px 10px", fontFamily: "'DM Sans',sans-serif", colorScheme: "dark", outline: "none" }}
+              />
+              <button onClick={addParcial} style={{ padding: "8px 14px", borderRadius: 8, border: "none", background: "#3b82f6", color: "#fff", fontSize: 16, fontWeight: 700, cursor: "pointer", flexShrink: 0 }}>+</button>
+            </div>
+            {sortedParciales.length === 0 ? (
+              <p style={{ fontSize: 12, color: "#334155", textAlign: "center", marginBottom: 24, marginTop: 8 }}>Sin parciales cargados</p>
+            ) : (
+              <div style={{ display: "flex", flexDirection: "column", gap: 7, marginBottom: 24 }}>
+                {sortedParciales.map((p, i) => {
+                  const todayMid = new Date(); todayMid.setHours(0, 0, 0, 0);
+                  const examDate = new Date(p.fecha + "T00:00:00");
+                  const daysLeft = Math.ceil((examDate - todayMid) / 86400000);
+                  const isUrgent = daysLeft < 7;
+                  const isWarning = daysLeft >= 7 && daysLeft < 14;
+                  const color = isUrgent ? "#ef4444" : isWarning ? "#f59e0b" : "#34d399";
+                  const bg = isUrgent ? "rgba(239,68,68,0.08)" : isWarning ? "rgba(245,158,11,0.08)" : "rgba(16,185,129,0.06)";
+                  const border = isUrgent ? "rgba(239,68,68,0.25)" : isWarning ? "rgba(245,158,11,0.25)" : "rgba(16,185,129,0.18)";
+                  const dateLabel = examDate.toLocaleDateString("es-AR", { day: "numeric", month: "long" });
+                  return (
+                    <div key={i} style={{ display: "flex", alignItems: "center", gap: 10, background: bg, border: `1px solid ${border}`, borderRadius: 10, padding: "10px 12px" }}>
+                      <div style={{ flex: 1 }}>
+                        <div style={{ fontSize: 13, fontWeight: 600, color: "#e2e8f0" }}>{p.materia}</div>
+                        <div style={{ fontSize: 10, color: "#64748b", marginTop: 2 }}>{dateLabel}</div>
+                      </div>
+                      <div style={{ textAlign: "right", minWidth: 44 }}>
+                        {daysLeft > 0 ? (
+                          <>
+                            <div style={{ fontSize: 22, fontWeight: 700, color, fontFamily: "'DM Mono',monospace", lineHeight: 1 }}>{daysLeft}</div>
+                            <div style={{ fontSize: 9, color: "#64748b" }}>días</div>
+                          </>
+                        ) : (
+                          <div style={{ fontSize: 11, fontWeight: 700, color: "#ef4444" }}>hoy</div>
+                        )}
+                      </div>
+                      <button onClick={() => removeParcial(i)} style={{ background: "none", border: "none", color: "#334155", cursor: "pointer", fontSize: 18, padding: "0 2px", lineHeight: 1 }}>×</button>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+
+            {/* Sesiones por día */}
             <h3 style={{ fontSize: 14, fontWeight: 700, margin: "0 0 12px", color: "#94a3b8" }}>Sesiones por día</h3>
             <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
               {DAY_FULL.map((dn, i) => {
@@ -326,7 +524,7 @@ export default function App() {
                 </div>);
               })}
             </div>
-            <button onClick={() => { if (window.confirm('¿Borrar todos los datos?')) { persist({ ...DEFAULT_DATA }); } }} style={{ marginTop: 28, padding: "8px 16px", borderRadius: 8, border: "1px solid rgba(239,68,68,0.2)", background: "transparent", color: "#64748b", fontSize: 11, cursor: "pointer", fontFamily: "'DM Sans',sans-serif" }}>Resetear datos</button>
+            <button onClick={() => { if (window.confirm("¿Borrar todos los datos?")) { persist({ ...DEFAULT_DATA }); } }} style={{ marginTop: 28, padding: "8px 16px", borderRadius: 8, border: "1px solid rgba(239,68,68,0.2)", background: "transparent", color: "#64748b", fontSize: 11, cursor: "pointer", fontFamily: "'DM Sans',sans-serif" }}>Resetear datos</button>
           </div>
         )}
       </div>

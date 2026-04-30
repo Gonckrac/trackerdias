@@ -118,15 +118,30 @@ export default function App() {
     return { done, total: blocks.length, pct: Math.round((done / blocks.length) * 100) };
   };
 
+  const playBeep = useCallback(() => {
+    try {
+      const ctx = new (window.AudioContext || window.webkitAudioContext)();
+      const beep = (freq, start, duration) => {
+        const o = ctx.createOscillator();
+        const g = ctx.createGain();
+        o.connect(g); g.connect(ctx.destination);
+        o.frequency.value = freq;
+        g.gain.setValueAtTime(0.3, ctx.currentTime + start);
+        g.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + start + duration);
+        o.start(ctx.currentTime + start);
+        o.stop(ctx.currentTime + start + duration);
+      };
+      beep(700, 0, 0.3);
+      beep(900, 0.35, 0.3);
+      beep(1100, 0.7, 0.4);
+    } catch {}
+  }, []);
+
   useEffect(() => {
     if (timerActive && timerSecs > 0) {
       intervalRef.current = setInterval(() => {
         setTimerSecs(p => {
-          if (p <= 1) {
-            clearInterval(intervalRef.current);
-            try { const ctx = new (window.AudioContext || window.webkitAudioContext)(); const o = ctx.createOscillator(); const g = ctx.createGain(); o.connect(g); g.connect(ctx.destination); o.frequency.value = 700; g.gain.value = 0.25; o.start(); o.stop(ctx.currentTime + 0.4); setTimeout(() => { try { const o2 = ctx.createOscillator(); const g2 = ctx.createGain(); o2.connect(g2); g2.connect(ctx.destination); o2.frequency.value = 900; g2.gain.value = 0.25; o2.start(); o2.stop(ctx.currentTime + 0.3); } catch {} }, 500); } catch {}
-            return 0;
-          }
+          if (p <= 1) { clearInterval(intervalRef.current); return 0; }
           return p - 1;
         });
       }, 1000);
@@ -151,10 +166,11 @@ export default function App() {
   useEffect(() => {
     if (timerSecs === 0 && timerActive) {
       setTimerActive(false);
+      playBeep();
       if (timerPhase === "study") { completeSession(); setTimerPhase("break"); setTimerSecs(STUDY_BREAK * 60); }
       else { setTimerPhase("study"); setTimerSecs(STUDY_ON * 60); }
     }
-  }, [timerSecs, timerActive, completeSession, timerPhase]);
+  }, [timerSecs, timerActive, completeSession, timerPhase, playBeep]);
 
   const toggleTimer = () => setTimerActive(p => !p);
   const resetTimer = () => { setTimerActive(false); setTimerPhase("study"); setTimerSecs(STUDY_ON * 60); };
@@ -213,7 +229,7 @@ export default function App() {
   const sortedParciales = [...(data.parciales || [])].sort((a, b) => new Date(a.fecha) - new Date(b.fecha));
 
   return (
-    <div style={{ fontFamily: "'DM Sans',sans-serif", background: "linear-gradient(150deg,#0c1222,#162032)", minHeight: "100vh", color: "#e2e8f0", paddingBottom: 80 }}>
+    <div style={{ fontFamily: "'DM Sans',sans-serif", background: "linear-gradient(150deg,#0c1222,#162032)", minHeight: "100vh", color: "#e2e8f0", paddingBottom: 96 }}>
       <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=DM+Mono:wght@400;500&display=swap" rel="stylesheet" />
       <div style={{ maxWidth: 480, margin: "0 auto", padding: "16px 14px" }}>
 
@@ -529,7 +545,7 @@ export default function App() {
         )}
       </div>
 
-      <div style={{ position: "fixed", bottom: 0, left: 0, right: 0, background: "rgba(12,18,34,0.95)", backdropFilter: "blur(12px)", borderTop: "1px solid rgba(255,255,255,0.06)", display: "flex", justifyContent: "center", padding: "8px 0 env(safe-area-inset-bottom, 12px)" }}>
+      <div style={{ position: "fixed", bottom: 16, left: 16, right: 16, background: "rgba(12,18,34,0.95)", backdropFilter: "blur(12px)", border: "1px solid rgba(255,255,255,0.08)", borderRadius: 20, display: "flex", justifyContent: "center", padding: "8px 0 10px" }}>
         <div style={{ display: "flex", gap: 0, maxWidth: 480, width: "100%" }}>
           {navItems.map(item => (<button key={item.id} onClick={() => setView(item.id)} style={{ flex: 1, background: "none", border: "none", cursor: "pointer", display: "flex", flexDirection: "column", alignItems: "center", gap: 2, padding: "4px 0" }}>
             <span style={{ fontSize: 20, opacity: view === item.id ? 1 : 0.4 }}>{item.icon}</span>

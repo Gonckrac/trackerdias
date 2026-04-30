@@ -6,12 +6,7 @@ const supabase = createClient(
 )
 
 function getUserId() {
-  let id = localStorage.getItem('rutina-user-id')
-  if (!id) {
-    id = 'user_' + Math.random().toString(36).slice(2, 11) + Date.now().toString(36)
-    localStorage.setItem('rutina-user-id', id)
-  }
-  return id
+  return 'gonza-main'
 }
 
 export async function loadData() {

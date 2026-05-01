@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useRef, useCallback, Fragment } from "react";
 import { loadData, saveData } from "./supabase.js";
 
 const DAYS = ["Dom","Lun","Mar","Mié","Jue","Vie","Sáb"];
@@ -75,14 +75,62 @@ const schedule = {
   ],
 };
 
-function todayKey() { return new Date().toISOString().slice(0, 10); }
+function localDateKey(d = new Date()) { return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`; }
+function todayKey() { return localDateKey(); }
 function dayOfWeek() { return new Date().getDay(); }
 function fmtHrs(h) { const hrs = Math.floor(h); const mins = Math.round((h - hrs) * 60); if (hrs === 0) return `${mins}min`; if (mins === 0) return `${hrs}h`; return `${hrs}h ${mins}m`; }
 function fmtTimer(s) { return `${String(Math.floor(s/60)).padStart(2,"0")}:${String(s%60).padStart(2,"0")}`; }
 function getTotalSessions(d) { return schedule[d].filter(b => b.cat === "estudio").reduce((s, b) => s + (b.sessions || 0), 0); }
 
+// --- Helper functions (change 1) ---
+function calcStreak(days, fromKey) {
+  let streak = 0;
+  let checkDate = new Date(fromKey + 'T12:00:00');
+  for (let i = 0; i < 3650; i++) {
+    const k = localDateKey(checkDate);
+    if (days[k]?.completed > 0) {
+      streak++;
+      checkDate.setDate(checkDate.getDate() - 1);
+    } else {
+      break;
+    }
+  }
+  return streak;
+}
+
+function parseBlockTime(timeStr) {
+  const parts = timeStr.split('–');
+  if (parts.length < 2) return null;
+  const parseHM = (s) => {
+    const [h, m] = s.trim().split(':').map(Number);
+    return h * 60 + (m || 0);
+  };
+  return { from: parseHM(parts[0]), to: parseHM(parts[1]) };
+}
+
+function isBlockActive(block) {
+  const parsed = parseBlockTime(block.time);
+  if (!parsed) return false;
+  const now = new Date();
+  const nowMins = now.getHours() * 60 + now.getMinutes();
+  return nowMins >= parsed.from && nowMins < parsed.to;
+}
+
+function isBlockPast(block) {
+  const parsed = parseBlockTime(block.time);
+  if (!parsed) return false;
+  const now = new Date();
+  const nowMins = now.getHours() * 60 + now.getMinutes();
+  return nowMins >= parsed.to;
+}
+
+// --- Module-level computed constants (change 1) ---
+const WEEKLY_TARGET_SESSIONS = DAY_FULL.reduce((sum, day) => sum + getTotalSessions(day), 0);
+const WEEKLY_STUDY_HOURS = Object.values(schedule).flat().filter(b => b.cat === 'estudio').reduce((sum, b) => sum + b.hrs, 0);
+
 const VIEW = { RUTINA: 0, TIMER: 1, STATS: 2 };
-const DEFAULT_DATA = { days: {}, streak: 0, lastStudy: null, totalSessions: 0, checked: {}, subjectSessions: {}, parciales: [] };
+// Change 2: add bestStreak to DEFAULT_DATA
+const DEFAULT_DATA = { days: {}, streak: 0, bestStreak: 0, lastStudy: null, totalSessions: 0, checked: {}, subjectSessions: {}, parciales: [] };
 
 export default function App() {
   const [view, setView] = useState(VIEW.RUTINA);
@@ -95,27 +143,88 @@ export default function App() {
   const [timerSecs, setTimerSecs] = useState(STUDY_ON * 60);
   const [timerSubject, setTimerSubject] = useState("Cálculo");
   const [parcialesForm, setParcialesForm] = useState({ materia: "Cálculo", fecha: "" });
-  const intervalRef = useRef(null);
+  // Change 3: new state
+  const [timerNotif, setTimerNotif] = useState(null);
+  const [pendingSubjectBlock, setPendingSubjectBlock] = useState(null);
+  const [showPastParciales, setShowPastParciales] = useState(false);
+  const [, forceTimeTick] = useState(0);
 
-  useEffect(() => { loadData().then(d => { setData(d ? { ...DEFAULT_DATA, ...d } : DEFAULT_DATA); setLoading(false); }); }, []);
+  const intervalRef = useRef(null);
+  const endTimeRef = useRef(null);
+  const timerSecsRef = useRef(STUDY_ON * 60);
+  useEffect(() => { timerSecsRef.current = timerSecs; }, [timerSecs]);
+
+  // Change 4: initial load + restore timer from localStorage
+  useEffect(() => {
+    const saved = localStorage.getItem('rutina-timer');
+    if (saved) {
+      try {
+        const t = JSON.parse(saved);
+        if (t.endTime > Date.now() + 2000) {
+          const remaining = Math.round((t.endTime - Date.now()) / 1000);
+          setTimerPhase(t.phase);
+          setTimerSecs(remaining);
+          timerSecsRef.current = remaining;
+          endTimeRef.current = t.endTime;
+          if (t.subject) setTimerSubject(t.subject);
+        } else {
+          localStorage.removeItem('rutina-timer');
+        }
+      } catch {}
+    }
+    loadData().then(d => { setData(d ? { ...DEFAULT_DATA, ...d } : DEFAULT_DATA); setLoading(false); });
+  }, []);
 
   const persist = useCallback(async (nd) => { setData(nd); setSaving(true); await saveData(nd); setSaving(false); }, []);
 
-  const toggleCheck = useCallback((blockId) => {
+  // Change 5: 30-second tick for active block indicator
+  useEffect(() => {
+    if (view !== VIEW.RUTINA) return;
+    const id = setInterval(() => forceTimeTick(n => n + 1), 30000);
+    return () => clearInterval(id);
+  }, [view]);
+
+  // Change 7: toggleCheck
+  const toggleCheck = useCallback((block) => {
     if (!data) return;
+    // Clear any pending subject picker
+    setPendingSubjectBlock(null);
     const key = todayKey();
     const checkedToday = { ...(data.checked?.[key] || {}) };
-    checkedToday[blockId] = !checkedToday[blockId];
-    persist({ ...data, checked: { ...data.checked, [key]: checkedToday } });
+    const wasChecked = !!checkedToday[block.id];
+    checkedToday[block.id] = !wasChecked;
+    let updatedData = { ...data, checked: { ...data.checked, [key]: checkedToday } };
+    if (block.cat === 'estudio' && block.sessions) {
+      const delta = wasChecked ? -block.sessions : block.sessions;
+      const target = getTotalSessions(DAY_FULL[dayOfWeek()]);
+      const dd = { ...(data.days[key] || { completed: 0, target }), target };
+      dd.completed = Math.max(0, dd.completed + delta);
+      const newDays = { ...data.days, [key]: dd };
+      let streak = data.streak || 0;
+      if (!wasChecked) {
+        // Use calcStreak for unified recalc
+        streak = calcStreak(newDays, key);
+      }
+      const bestStreak = Math.max(data.bestStreak || 0, streak);
+      updatedData = { ...updatedData, days: newDays, streak, bestStreak, lastStudy: !wasChecked ? key : data.lastStudy, totalSessions: Math.max(0, (data.totalSessions || 0) + delta) };
+    }
+    persist(updatedData);
+    // Change 7: trigger subject picker after checking a study block
+    if (!wasChecked && block.cat === 'estudio' && block.sessions) {
+      setPendingSubjectBlock(block.id);
+    }
   }, [data, persist]);
 
   const isChecked = (blockId) => data?.checked?.[todayKey()]?.[blockId] || false;
 
+  // Change 15: getDayProgress counts only study blocks
   const getDayProgress = () => {
-    const blocks = schedule[DAY_FULL[dayOfWeek()]];
+    const studyBlocks = schedule[DAY_FULL[dayOfWeek()]].filter(b => b.cat === 'estudio');
     const checkedToday = data?.checked?.[todayKey()] || {};
-    const done = blocks.filter(b => checkedToday[b.id]).length;
-    return { done, total: blocks.length, pct: Math.round((done / blocks.length) * 100) };
+    const done = studyBlocks.filter(b => checkedToday[b.id]).length;
+    const total = studyBlocks.length;
+    const pct = total > 0 ? Math.round((done / total) * 100) : 0;
+    return { done, total, pct };
   };
 
   const playBeep = useCallback(() => {
@@ -137,52 +246,124 @@ export default function App() {
     } catch {}
   }, []);
 
+  // Change 6: timer interval effect — save to localStorage on start
   useEffect(() => {
-    if (timerActive && timerSecs > 0) {
+    if (timerActive && timerSecsRef.current > 0) {
+      endTimeRef.current = Date.now() + timerSecsRef.current * 1000;
+      localStorage.setItem('rutina-timer', JSON.stringify({ phase: timerPhase, endTime: endTimeRef.current, subject: timerSubject }));
       intervalRef.current = setInterval(() => {
-        setTimerSecs(p => {
-          if (p <= 1) { clearInterval(intervalRef.current); return 0; }
-          return p - 1;
-        });
-      }, 1000);
+        const remaining = Math.max(0, Math.round((endTimeRef.current - Date.now()) / 1000));
+        setTimerSecs(remaining);
+        if (remaining <= 0) clearInterval(intervalRef.current);
+      }, 500);
     }
     return () => clearInterval(intervalRef.current);
+  }, [timerActive]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    const onVisible = () => {
+      if (!document.hidden && timerActive && endTimeRef.current) {
+        const remaining = Math.max(0, Math.round((endTimeRef.current - Date.now()) / 1000));
+        setTimerSecs(remaining);
+      }
+    };
+    document.addEventListener('visibilitychange', onVisible);
+    return () => document.removeEventListener('visibilitychange', onVisible);
   }, [timerActive]);
 
+  // Change 9: completeSession
   const completeSession = useCallback(() => {
     if (!data) return;
     const key = todayKey();
     const target = getTotalSessions(DAY_FULL[dayOfWeek()]);
     const dd = { ...(data.days[key] || { completed: 0, target }) };
     dd.completed += 1; dd.target = target;
-    let streak = data.streak || 0;
-    const last = data.lastStudy;
-    if (last) { const diff = Math.floor((new Date(key) - new Date(last)) / 86400000); if (diff === 1) streak += 1; else if (diff > 1) streak = 1; } else streak = 1;
+    const newDays = { ...data.days, [key]: dd };
+    const streak = calcStreak(newDays, key);
+    const bestStreak = Math.max(data.bestStreak || 0, streak);
     const prevSubjDay = data.subjectSessions?.[key] || {};
     const newSubjDay = { ...prevSubjDay, [timerSubject]: (prevSubjDay[timerSubject] || 0) + 1 };
-    persist({ ...data, days: { ...data.days, [key]: dd }, streak, lastStudy: key, totalSessions: (data.totalSessions || 0) + 1, subjectSessions: { ...data.subjectSessions, [key]: newSubjDay } });
+    persist({ ...data, days: newDays, streak, bestStreak, lastStudy: key, totalSessions: (data.totalSessions || 0) + 1, subjectSessions: { ...data.subjectSessions, [key]: newSubjDay } });
+    setTimerNotif('🎯 Sesión ' + (dd.completed) + ' registrada');
+    setTimeout(() => setTimerNotif(null), 2500);
+    localStorage.removeItem('rutina-timer');
   }, [data, persist, timerSubject]);
 
+  // Change 12: timer completion effect — break→study branch also removes localStorage
   useEffect(() => {
     if (timerSecs === 0 && timerActive) {
       setTimerActive(false);
       playBeep();
-      if (timerPhase === "study") { completeSession(); setTimerPhase("break"); setTimerSecs(STUDY_BREAK * 60); }
-      else { setTimerPhase("study"); setTimerSecs(STUDY_ON * 60); }
+      if (timerPhase === "study") {
+        completeSession();
+        setTimerPhase("break");
+        setTimerSecs(STUDY_BREAK * 60);
+      } else {
+        setTimerPhase("study");
+        setTimerSecs(STUDY_ON * 60);
+        localStorage.removeItem('rutina-timer');
+      }
     }
   }, [timerSecs, timerActive, completeSession, timerPhase, playBeep]);
 
   const toggleTimer = () => setTimerActive(p => !p);
-  const resetTimer = () => { setTimerActive(false); setTimerPhase("study"); setTimerSecs(STUDY_ON * 60); };
-  const skipPhase = () => { setTimerActive(false); if (timerPhase === "study") { completeSession(); setTimerPhase("break"); setTimerSecs(STUDY_BREAK * 60); } else { setTimerPhase("study"); setTimerSecs(STUDY_ON * 60); } };
 
+  // Change 10: resetTimer removes localStorage
+  const resetTimer = () => {
+    setTimerActive(false);
+    setTimerPhase("study");
+    setTimerSecs(STUDY_ON * 60);
+    localStorage.removeItem('rutina-timer');
+  };
+
+  // Change 11: skipPhase break→study branch removes localStorage
+  const skipPhase = () => {
+    setTimerActive(false);
+    if (timerPhase === "study") {
+      completeSession();
+      setTimerPhase("break");
+      setTimerSecs(STUDY_BREAK * 60);
+    } else {
+      setTimerPhase("study");
+      setTimerSecs(STUDY_ON * 60);
+      localStorage.removeItem('rutina-timer');
+    }
+  };
+
+  // Change 14: addPastSession uses calcStreak + bestStreak
+  const addPastSession = useCallback((key, dayIdx) => {
+    if (!data) return;
+    const target = getTotalSessions(DAY_FULL[dayIdx]);
+    const dd = { ...(data.days[key] || { completed: 0, target }), target };
+    dd.completed += 1;
+    const newDays = { ...data.days, [key]: dd };
+    const newLastStudy = (!data.lastStudy || key > data.lastStudy) ? key : data.lastStudy;
+    const streak = calcStreak(newDays, newLastStudy);
+    const bestStreak = Math.max(data.bestStreak || 0, streak);
+    persist({ ...data, days: newDays, streak, bestStreak, lastStudy: newLastStudy, totalSessions: (data.totalSessions || 0) + 1 });
+  }, [data, persist]);
+
+  // Change 13: markDayDone uses calcStreak + bestStreak
   const markDayDone = useCallback(() => {
     if (!data) return;
-    const key = todayKey(); const target = getTotalSessions(DAY_FULL[dayOfWeek()]); const prev = data.days[key]?.completed || 0;
-    let streak = data.streak || 0; const last = data.lastStudy;
-    if (last) { const diff = Math.floor((new Date(key) - new Date(last)) / 86400000); if (diff === 1) streak += 1; else if (diff > 1) streak = 1; } else streak = 1;
-    const allChecked = {}; schedule[DAY_FULL[dayOfWeek()]].forEach(b => { allChecked[b.id] = true; });
-    persist({ ...data, days: { ...data.days, [key]: { completed: target, target } }, streak, lastStudy: key, totalSessions: (data.totalSessions || 0) + Math.max(0, target - prev), checked: { ...data.checked, [key]: { ...(data.checked?.[key] || {}), ...allChecked } } });
+    const key = todayKey();
+    const target = getTotalSessions(DAY_FULL[dayOfWeek()]);
+    const prev = data.days[key]?.completed || 0;
+    const newDays = { ...data.days, [key]: { completed: target, target } };
+    const streak = calcStreak(newDays, key);
+    const bestStreak = Math.max(data.bestStreak || 0, streak);
+    const allChecked = {};
+    schedule[DAY_FULL[dayOfWeek()]].forEach(b => { allChecked[b.id] = true; });
+    persist({ ...data, days: newDays, streak, bestStreak, lastStudy: key, totalSessions: (data.totalSessions || 0) + Math.max(0, target - prev), checked: { ...data.checked, [key]: { ...(data.checked?.[key] || {}), ...allChecked } } });
+  }, [data, persist]);
+
+  // Change 8: registerSubject callback
+  const registerSubject = useCallback((subject) => {
+    if (!data) return;
+    const key = todayKey();
+    const prev = data.subjectSessions?.[key] || {};
+    persist({ ...data, subjectSessions: { ...data.subjectSessions, [key]: { ...prev, [subject]: (prev[subject] || 0) + 1 } } });
+    setPendingSubjectBlock(null);
   }, [data, persist]);
 
   const addParcial = useCallback(() => {
@@ -209,16 +390,24 @@ export default function App() {
   const isToday = selDay === dayOfWeek();
   const dayProgress = isToday ? getDayProgress() : null;
 
+  // Change 27: unified last7 array
+  const last7 = Array.from({ length: 7 }, (_, i) => {
+    const d = new Date(); d.setDate(d.getDate() - i);
+    return { key: localDateKey(d), dayIdx: d.getDay(), date: d.getDate(), month: d.getMonth() };
+  });
+
   // --- Stats computations ---
   const weekSubjectTotals = {};
   SUBJECTS.forEach(s => { weekSubjectTotals[s] = 0; });
-  for (let i = 0; i < 7; i++) {
-    const d = new Date(); d.setDate(d.getDate() - i);
-    const key = d.toISOString().slice(0, 10);
+  last7.forEach(({ key }) => {
     const daySubs = data.subjectSessions?.[key] || {};
     SUBJECTS.forEach(s => { weekSubjectTotals[s] += daySubs[s] || 0; });
-  }
+  });
   const maxSubjSessions = Math.max(1, ...SUBJECTS.map(s => weekSubjectTotals[s]));
+
+  // Change 21: weekly summary stats
+  const weekDaysStudied = last7.filter(({ key }) => (data.days[key]?.completed || 0) > 0).length;
+  const weekSessionsTotal = last7.reduce((sum, { key }) => sum + (data.days[key]?.completed || 0), 0);
 
   const now = new Date();
   const heatYear = now.getFullYear();
@@ -228,15 +417,24 @@ export default function App() {
 
   const sortedParciales = [...(data.parciales || [])].sort((a, b) => new Date(a.fecha) - new Date(b.fecha));
 
+  // Change 24: split parciales into upcoming and past
+  const todayMid = new Date(); todayMid.setHours(0, 0, 0, 0);
+  const upcomingParciales = sortedParciales.filter(p => new Date(p.fecha + 'T00:00:00') >= todayMid);
+  const pastParciales = sortedParciales.filter(p => new Date(p.fecha + 'T00:00:00') < todayMid).reverse();
+
+  // Change 23: parcial dates set for heatmap markers
+  const parcialDatesSet = new Set((data.parciales || []).map(p => p.fecha));
+
   return (
-    <div style={{ fontFamily: "'DM Sans',sans-serif", background: "linear-gradient(150deg,#0c1222,#162032)", minHeight: "100vh", color: "#e2e8f0", paddingBottom: 96 }}>
-      <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=DM+Mono:wght@400;500&display=swap" rel="stylesheet" />
-      <div style={{ maxWidth: 480, margin: "0 auto", padding: "16px 14px" }}>
+    // Change 26: safe area iOS paddingBottom
+    <div style={{ fontFamily: "'DM Sans',sans-serif", background: "linear-gradient(150deg,#0c1222,#162032)", minHeight: "100vh", color: "#e2e8f0", paddingBottom: 'calc(96px + env(safe-area-inset-bottom, 0px))' }}>
+<div style={{ maxWidth: 480, margin: "0 auto", padding: "16px 14px" }}>
 
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
           <div>
             <h1 style={{ fontSize: 20, fontWeight: 700, margin: 0, color: "#f1f5f9" }}>Mi Rutina</h1>
-            <p style={{ fontSize: 11, color: "#475569", margin: "2px 0 0" }}>18 sesiones · 19h 30m/semana{saving && <span style={{ marginLeft: 8, color: "#f59e0b" }}>💾</span>}</p>
+            {/* Change 16: dynamic weekly stats */}
+            <p style={{ fontSize: 11, color: "#475569", margin: "2px 0 0" }}>{`${WEEKLY_TARGET_SESSIONS} sesiones · ${fmtHrs(WEEKLY_STUDY_HOURS)}/semana`}{saving && <span style={{ marginLeft: 8, color: "#f59e0b" }}>💾</span>}</p>
           </div>
           <div style={{ display: "flex", gap: 8 }}>
             {data.streak > 0 && <div style={{ background: "rgba(245,158,11,0.12)", border: "1px solid rgba(245,158,11,0.25)", borderRadius: 8, padding: "6px 10px", textAlign: "center" }}><div style={{ fontSize: 16 }}>🔥</div><div style={{ fontSize: 11, fontWeight: 700, color: "#f59e0b" }}>{data.streak}</div></div>}
@@ -270,32 +468,64 @@ export default function App() {
             </div>
           )}
 
+          {/* Change 17+18: block list with active indicator and subject picker */}
           <div style={{ display: "flex", flexDirection: "column", gap: 5 }}>
             {schedule[DAY_FULL[selDay]].map((block) => {
               const cat = CAT[block.cat];
               const checked = isToday && isChecked(block.id);
+              // Change 17: active/past block indicators
+              const active = isToday && isBlockActive(block);
+              const past = isToday && !checked && block.cat === 'estudio' && isBlockPast(block);
+
+              // Build dynamic style for the block
+              const blockStyle = {
+                display: "flex", alignItems: "center", gap: 10,
+                background: active ? "rgba(16,185,129,0.06)" : checked ? "rgba(255,255,255,0.02)" : cat.bg,
+                border: active
+                  ? "1px solid rgba(16,185,129,0.2)"
+                  : `1px solid ${checked ? "rgba(255,255,255,0.06)" : cat.color + "20"}`,
+                borderLeft: active ? "3px solid #10b981" : undefined,
+                borderRadius: 10, padding: "10px 12px",
+                cursor: isToday ? "pointer" : "default",
+                opacity: checked ? 0.45 : past ? 0.55 : 1,
+                transition: "all 0.25s ease",
+              };
+
               return (
-                <div key={block.id} onClick={() => { if (isToday) toggleCheck(block.id); }} style={{
-                  display: "flex", alignItems: "center", gap: 10,
-                  background: checked ? "rgba(255,255,255,0.02)" : cat.bg,
-                  border: `1px solid ${checked ? "rgba(255,255,255,0.06)" : cat.color + "20"}`,
-                  borderRadius: 10, padding: "10px 12px",
-                  cursor: isToday ? "pointer" : "default",
-                  opacity: checked ? 0.45 : 1,
-                  transition: "all 0.25s ease",
-                }}>
-                  {isToday ? (
-                    <div style={{ width: 22, height: 22, borderRadius: "50%", flexShrink: 0, border: checked ? "none" : "2px solid rgba(255,255,255,0.15)", background: checked ? cat.color : "transparent", display: "flex", alignItems: "center", justifyContent: "center", transition: "all 0.2s ease" }}>
-                      {checked && <span style={{ color: "#fff", fontSize: 12, fontWeight: 700 }}>✓</span>}
+                // Change 18: wrap in Fragment for subject picker
+                <Fragment key={block.id}>
+                  <div onClick={() => { if (isToday) toggleCheck(block); }} style={blockStyle}>
+                    {isToday ? (
+                      <div style={{ width: 22, height: 22, borderRadius: "50%", flexShrink: 0, border: checked ? "none" : "2px solid rgba(255,255,255,0.15)", background: checked ? cat.color : "transparent", display: "flex", alignItems: "center", justifyContent: "center", transition: "all 0.2s ease" }}>
+                        {checked && <span style={{ color: "#fff", fontSize: 12, fontWeight: 700 }}>✓</span>}
+                      </div>
+                    ) : (
+                      <div style={{ width: 3, height: 30, borderRadius: 2, background: cat.color, flexShrink: 0 }} />
+                    )}
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ fontSize: 13, fontWeight: 600, textDecoration: checked ? "line-through" : "none", color: checked ? "#475569" : "#e2e8f0", display: "flex", alignItems: "center" }}>
+                        {cat.emoji} {block.text}
+                        {/* Change 17: AHORA badge */}
+                        {active && (
+                          <span style={{ marginLeft: 6, fontSize: 9, fontWeight: 700, color: '#10b981', background: 'rgba(16,185,129,0.15)', padding: '1px 5px', borderRadius: 4 }}>AHORA</span>
+                        )}
+                      </div>
+                      <div style={{ fontSize: 10, color: checked ? "#334155" : "#64748b", marginTop: 1 }}>{block.time}{block.sessions && <span style={{ marginLeft: 6, color: checked ? "#334155" : "#10b981" }}>· {block.sessions} × 1:05 + descansos</span>}</div>
                     </div>
-                  ) : (
-                    <div style={{ width: 3, height: 30, borderRadius: 2, background: cat.color, flexShrink: 0 }} />
-                  )}
-                  <div style={{ flex: 1, minWidth: 0 }}>
-                    <div style={{ fontSize: 13, fontWeight: 600, textDecoration: checked ? "line-through" : "none", color: checked ? "#475569" : "#e2e8f0" }}>{cat.emoji} {block.text}</div>
-                    <div style={{ fontSize: 10, color: checked ? "#334155" : "#64748b", marginTop: 1 }}>{block.time}{block.sessions && <span style={{ marginLeft: 6, color: checked ? "#334155" : "#10b981" }}>· {block.sessions} × 1:05 + descansos</span>}</div>
                   </div>
-                </div>
+                  {/* Change 18: inline subject picker */}
+                  {pendingSubjectBlock === block.id && (
+                    <div style={{ background: 'rgba(59,130,246,0.08)', border: '1px solid rgba(59,130,246,0.2)', borderRadius: 10, padding: '10px 12px', marginTop: -4 }}>
+                      <p style={{ margin: '0 0 8px', fontSize: 11, color: '#94a3b8' }}>📖 ¿Qué materia estudiaste?</p>
+                      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 5 }}>
+                        {SUBJECTS.map(s => (
+                          <button key={s} onClick={() => registerSubject(s)} style={{ padding: '5px 10px', borderRadius: 16, border: '1px solid rgba(59,130,246,0.3)', background: 'rgba(59,130,246,0.12)', color: '#60a5fa', fontSize: 11, fontWeight: 600, cursor: 'pointer', fontFamily: "'DM Sans',sans-serif" }}>{s}</button>
+                        ))}
+                        <button onClick={() => setPendingSubjectBlock(null)} style={{ padding: '5px 10px', borderRadius: 16, border: '1px solid rgba(255,255,255,0.06)', background: 'transparent', color: '#475569', fontSize: 11, cursor: 'pointer', fontFamily: "'DM Sans',sans-serif" }}>Saltar →</button>
+                      </div>
+                    </div>
+                  )}
+                </Fragment>
               );
             })}
           </div>
@@ -307,12 +537,24 @@ export default function App() {
               <div style={{ fontSize: 11, color: "#475569", marginTop: 2 }}>Todos los bloques tachados. A descansar.</div>
             </div>
           )}
+
+          {/* Change 19: "Marcar todo hoy" moved to Rutina view */}
+          {isToday && studyPct < 100 && todayTarget > 0 && (
+            <button onClick={markDayDone} style={{ marginTop: 12, width: '100%', padding: '10px', borderRadius: 8, border: '1px solid rgba(16,185,129,0.25)', background: 'rgba(16,185,129,0.06)', color: '#34d399', fontSize: 12, fontWeight: 600, cursor: 'pointer', fontFamily: "'DM Sans',sans-serif" }}>✓ Marcar todo el estudio como hecho</button>
+          )}
         </>)}
 
         {view === VIEW.TIMER && (
           <div style={{ display: "flex", flexDirection: "column", alignItems: "center", paddingTop: 20 }}>
             <p style={{ fontSize: 13, color: "#64748b", marginBottom: 4 }}>{todayDayName} — {todayTarget > 0 ? `${todayTarget} sesiones hoy` : "Sin estudio hoy"}</p>
             <p style={{ fontSize: 12, color: timerPhase === "study" ? "#10b981" : "#a78bfa", fontWeight: 600, marginBottom: 16 }}>{timerPhase === "study" ? "🎯 Sesión de estudio (1:05)" : "☕ Descanso (10 min)"}</p>
+
+            {/* Change 20: timerNotif */}
+            {timerNotif && (
+              <div style={{ padding: '6px 16px', borderRadius: 20, background: 'rgba(16,185,129,0.12)', border: '1px solid rgba(16,185,129,0.3)', color: '#34d399', fontSize: 12, fontWeight: 600, marginBottom: 12 }}>
+                {timerNotif}
+              </div>
+            )}
 
             {timerPhase === "study" && (
               <div style={{ width: "100%", marginBottom: 20 }}>
@@ -357,22 +599,39 @@ export default function App() {
                 <div style={{ height: "100%", borderRadius: 4, width: `${studyPct}%`, background: studyPct >= 100 ? "#10b981" : "linear-gradient(90deg,#3b82f6,#60a5fa)", transition: "width 0.3s" }} />
               </div>
             </div>
-            {studyPct < 100 && todayTarget > 0 && <button onClick={markDayDone} style={{ marginTop: 20, padding: "10px 20px", borderRadius: 8, border: "1px solid rgba(16,185,129,0.3)", background: "rgba(16,185,129,0.08)", color: "#34d399", fontSize: 12, fontWeight: 600, cursor: "pointer", fontFamily: "'DM Sans',sans-serif" }}>✓ Marcar todo hoy como hecho</button>}
+            {/* Change 19: "Marcar todo hoy" removed from Timer view */}
           </div>
         )}
 
         {view === VIEW.STATS && (
           <div style={{ paddingTop: 8 }}>
 
-            {/* KPI cards */}
+            {/* Change 21: weekly summary card */}
+            {weekSessionsTotal > 0 && (
+              <div style={{ background: 'rgba(59,130,246,0.06)', border: '1px solid rgba(59,130,246,0.15)', borderRadius: 10, padding: '10px 14px', marginBottom: 16, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                <span style={{ fontSize: 12, color: '#94a3b8' }}>Esta semana</span>
+                <span style={{ fontSize: 12, fontWeight: 700, color: '#60a5fa' }}>{weekDaysStudied} días · {weekSessionsTotal} sesiones</span>
+              </div>
+            )}
+
+            {/* Change 22: KPI cards — streak card shows bestStreak */}
             <div style={{ display: "flex", gap: 8, marginBottom: 20 }}>
-              {[{ value: `${data.streak || 0}`, sub: "días racha", color: "#f59e0b", icon: "🔥" }, { value: `${data.totalSessions || 0}`, sub: "sesiones total", color: "#3b82f6", icon: "📚" }, { value: `${studyPct}%`, sub: "estudio hoy", color: studyPct >= 100 ? "#10b981" : "#60a5fa", icon: studyPct >= 100 ? "✅" : "📈" }].map((s, i) => (
-                <div key={i} style={{ flex: 1, background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.06)", borderRadius: 12, padding: "14px 10px", textAlign: "center" }}>
-                  <div style={{ fontSize: 20, marginBottom: 4 }}>{s.icon}</div>
-                  <div style={{ fontSize: 22, fontWeight: 700, color: s.color, fontFamily: "'DM Mono',monospace" }}>{s.value}</div>
-                  <div style={{ fontSize: 10, color: "#475569", marginTop: 2 }}>{s.sub}</div>
-                </div>
-              ))}
+              <div style={{ flex: 1, background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.06)", borderRadius: 12, padding: "14px 10px", textAlign: "center" }}>
+                <div style={{ fontSize: 20, marginBottom: 4 }}>🔥</div>
+                <div style={{ fontSize: 22, fontWeight: 700, color: "#f59e0b", fontFamily: "'DM Mono',monospace" }}>{data.streak || 0}</div>
+                <div style={{ fontSize: 10, color: "#475569", marginTop: 2 }}>días racha</div>
+                <div style={{ fontSize: 9, color: "#334155", marginTop: 2 }}>récord: {data.bestStreak || data.streak || 0}</div>
+              </div>
+              <div style={{ flex: 1, background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.06)", borderRadius: 12, padding: "14px 10px", textAlign: "center" }}>
+                <div style={{ fontSize: 20, marginBottom: 4 }}>📚</div>
+                <div style={{ fontSize: 22, fontWeight: 700, color: "#3b82f6", fontFamily: "'DM Mono',monospace" }}>{data.totalSessions || 0}</div>
+                <div style={{ fontSize: 10, color: "#475569", marginTop: 2 }}>sesiones total</div>
+              </div>
+              <div style={{ flex: 1, background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.06)", borderRadius: 12, padding: "14px 10px", textAlign: "center" }}>
+                <div style={{ fontSize: 20, marginBottom: 4 }}>{studyPct >= 100 ? "✅" : "📈"}</div>
+                <div style={{ fontSize: 22, fontWeight: 700, color: studyPct >= 100 ? "#10b981" : "#60a5fa", fontFamily: "'DM Mono',monospace" }}>{studyPct}%</div>
+                <div style={{ fontSize: 10, color: "#475569", marginTop: 2 }}>estudio hoy</div>
+              </div>
             </div>
 
             {/* Materias esta semana */}
@@ -398,24 +657,28 @@ export default function App() {
               )}
             </div>
 
-            {/* Últimos 7 días */}
+            {/* Últimos 7 días — uses unified last7 array */}
             <h3 style={{ fontSize: 14, fontWeight: 700, margin: "0 0 12px", color: "#94a3b8" }}>Últimos 7 días</h3>
             <div style={{ display: "flex", gap: 6, marginBottom: 24 }}>
-              {Array.from({ length: 7 }).map((_, i) => {
-                const d = new Date(); d.setDate(d.getDate() - (6 - i)); const key = d.toISOString().slice(0, 10); const dayIdx = d.getDay();
-                const target = getTotalSessions(DAY_FULL[dayIdx]); const completed = data.days?.[key]?.completed || 0;
-                const pct = target > 0 ? Math.min(100, Math.round((completed / target) * 100)) : (completed > 0 ? 100 : 0); const isTodayDot = key === todayKey();
+              {[...last7].reverse().map(({ key, dayIdx, date, month }, i) => {
+                const target = getTotalSessions(DAY_FULL[dayIdx]);
+                const completed = data.days?.[key]?.completed || 0;
+                const pct = target > 0 ? Math.min(100, Math.round((completed / target) * 100)) : (completed > 0 ? 100 : 0);
+                const isTodayDot = key === todayKey();
                 return (<div key={i} style={{ flex: 1, textAlign: "center", padding: "8px 0", background: isTodayDot ? "rgba(96,165,250,0.08)" : "transparent", borderRadius: 8, border: isTodayDot ? "1px solid rgba(96,165,250,0.2)" : "1px solid transparent" }}>
                   <div style={{ fontSize: 10, color: "#475569", marginBottom: 6 }}>{DAYS[dayIdx]}</div>
                   <div style={{ width: 28, height: 28, borderRadius: "50%", margin: "0 auto 4px", display: "flex", alignItems: "center", justifyContent: "center", background: pct >= 100 ? "rgba(16,185,129,0.2)" : pct > 0 ? "rgba(59,130,246,0.15)" : "rgba(255,255,255,0.04)", border: `2px solid ${pct >= 100 ? "#10b981" : pct > 0 ? "#3b82f6" : "transparent"}`, fontSize: 11, fontWeight: 700, color: pct >= 100 ? "#34d399" : pct > 0 ? "#60a5fa" : "#334155" }}>
                     {pct >= 100 ? "✓" : target === 0 ? "—" : pct > 0 ? pct : "·"}
                   </div>
-                  <div style={{ fontSize: 9, color: "#334155" }}>{d.getDate()}/{d.getMonth() + 1}</div>
+                  <div style={{ fontSize: 9, color: "#334155" }}>{date}/{month + 1}</div>
+                  {!isTodayDot && target > 0 && (
+                    <div onClick={() => addPastSession(key, dayIdx)} style={{ fontSize: 10, color: "#475569", cursor: "pointer", marginTop: 3, lineHeight: 1 }} title="Agregar sesión">+</div>
+                  )}
                 </div>);
               })}
             </div>
 
-            {/* Heatmap mensual */}
+            {/* Change 23: Heatmap mensual con marcadores de parciales */}
             <h3 style={{ fontSize: 14, fontWeight: 700, margin: "0 0 12px", color: "#94a3b8" }}>Actividad — {MONTH_NAMES[heatMonth]}</h3>
             <div style={{ background: "rgba(255,255,255,0.02)", border: "1px solid rgba(255,255,255,0.05)", borderRadius: 12, padding: "14px 12px", marginBottom: 24 }}>
               <div style={{ display: "grid", gridTemplateColumns: "repeat(7,1fr)", gap: 3, marginBottom: 4 }}>
@@ -456,6 +719,10 @@ export default function App() {
                       position: "relative",
                     }}>
                       {isTodayCell && <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 7, color: "rgba(255,255,255,0.6)", fontWeight: 700 }}>{day}</div>}
+                      {/* Change 23: parcial marker dot */}
+                      {parcialDatesSet.has(dateKey) && !isFuture && (
+                        <div style={{ position: 'absolute', top: 1, right: 1, width: 3, height: 3, borderRadius: '50%', background: '#f59e0b' }} />
+                      )}
                     </div>
                   );
                 })}
@@ -469,7 +736,7 @@ export default function App() {
               </div>
             </div>
 
-            {/* Parciales */}
+            {/* Change 24: Parciales split into upcoming and past */}
             <h3 style={{ fontSize: 14, fontWeight: 700, margin: "0 0 12px", color: "#94a3b8" }}>Parciales</h3>
             <div style={{ display: "flex", gap: 6, marginBottom: 10 }}>
               <select
@@ -487,12 +754,12 @@ export default function App() {
               />
               <button onClick={addParcial} style={{ padding: "8px 14px", borderRadius: 8, border: "none", background: "#3b82f6", color: "#fff", fontSize: 16, fontWeight: 700, cursor: "pointer", flexShrink: 0 }}>+</button>
             </div>
-            {sortedParciales.length === 0 ? (
+
+            {upcomingParciales.length === 0 && pastParciales.length === 0 ? (
               <p style={{ fontSize: 12, color: "#334155", textAlign: "center", marginBottom: 24, marginTop: 8 }}>Sin parciales cargados</p>
             ) : (
-              <div style={{ display: "flex", flexDirection: "column", gap: 7, marginBottom: 24 }}>
-                {sortedParciales.map((p, i) => {
-                  const todayMid = new Date(); todayMid.setHours(0, 0, 0, 0);
+              <div style={{ display: "flex", flexDirection: "column", gap: 7, marginBottom: 16 }}>
+                {upcomingParciales.map((p) => {
                   const examDate = new Date(p.fecha + "T00:00:00");
                   const daysLeft = Math.ceil((examDate - todayMid) / 86400000);
                   const isUrgent = daysLeft < 7;
@@ -501,8 +768,10 @@ export default function App() {
                   const bg = isUrgent ? "rgba(239,68,68,0.08)" : isWarning ? "rgba(245,158,11,0.08)" : "rgba(16,185,129,0.06)";
                   const border = isUrgent ? "rgba(239,68,68,0.25)" : isWarning ? "rgba(245,158,11,0.25)" : "rgba(16,185,129,0.18)";
                   const dateLabel = examDate.toLocaleDateString("es-AR", { day: "numeric", month: "long" });
+                  // Use original index for removal
+                  const origIdx = data.parciales.findIndex(orig => orig.materia === p.materia && orig.fecha === p.fecha);
                   return (
-                    <div key={i} style={{ display: "flex", alignItems: "center", gap: 10, background: bg, border: `1px solid ${border}`, borderRadius: 10, padding: "10px 12px" }}>
+                    <div key={`${p.materia}-${p.fecha}`} style={{ display: "flex", alignItems: "center", gap: 10, background: bg, border: `1px solid ${border}`, borderRadius: 10, padding: "10px 12px" }}>
                       <div style={{ flex: 1 }}>
                         <div style={{ fontSize: 13, fontWeight: 600, color: "#e2e8f0" }}>{p.materia}</div>
                         <div style={{ fontSize: 10, color: "#64748b", marginTop: 2 }}>{dateLabel}</div>
@@ -517,15 +786,46 @@ export default function App() {
                           <div style={{ fontSize: 11, fontWeight: 700, color: "#ef4444" }}>hoy</div>
                         )}
                       </div>
-                      <button onClick={() => removeParcial(i)} style={{ background: "none", border: "none", color: "#334155", cursor: "pointer", fontSize: 18, padding: "0 2px", lineHeight: 1 }}>×</button>
+                      <button onClick={() => removeParcial(origIdx)} style={{ background: "none", border: "none", color: "#334155", cursor: "pointer", fontSize: 18, padding: "0 2px", lineHeight: 1 }}>×</button>
                     </div>
                   );
                 })}
               </div>
             )}
 
-            {/* Sesiones por día */}
-            <h3 style={{ fontSize: 14, fontWeight: 700, margin: "0 0 12px", color: "#94a3b8" }}>Sesiones por día</h3>
+            {/* Change 24: past parciales toggle */}
+            {pastParciales.length > 0 && (
+              <div style={{ marginBottom: 24 }}>
+                <button onClick={() => setShowPastParciales(p => !p)} style={{ width: '100%', padding: '7px 12px', borderRadius: 8, border: '1px solid rgba(255,255,255,0.06)', background: 'rgba(255,255,255,0.02)', color: '#475569', fontSize: 11, cursor: 'pointer', fontFamily: "'DM Sans',sans-serif", textAlign: 'left' }}>
+                  {showPastParciales ? '▲ Ocultar pasados' : `▼ Ver pasados (${pastParciales.length})`}
+                </button>
+                {showPastParciales && (
+                  <div style={{ display: "flex", flexDirection: "column", gap: 7, marginTop: 8 }}>
+                    {pastParciales.map((p) => {
+                      const examDate = new Date(p.fecha + "T00:00:00");
+                      const dateLabel = examDate.toLocaleDateString("es-AR", { day: "numeric", month: "long" });
+                      const origIdx = data.parciales.findIndex(orig => orig.materia === p.materia && orig.fecha === p.fecha);
+                      return (
+                        <div key={`past-${p.materia}-${p.fecha}`} style={{ display: "flex", alignItems: "center", gap: 10, background: "rgba(255,255,255,0.02)", border: "1px solid rgba(255,255,255,0.05)", borderRadius: 10, padding: "10px 12px", opacity: 0.5 }}>
+                          <div style={{ flex: 1 }}>
+                            <div style={{ fontSize: 13, fontWeight: 600, color: "#94a3b8" }}>{p.materia}</div>
+                            <div style={{ fontSize: 10, color: "#475569", marginTop: 2 }}>{dateLabel}</div>
+                          </div>
+                          <div style={{ textAlign: "right", minWidth: 44 }}>
+                            <div style={{ fontSize: 11, fontWeight: 600, color: "#475569" }}>Pasado</div>
+                          </div>
+                          <button onClick={() => removeParcial(origIdx)} style={{ background: "none", border: "none", color: "#334155", cursor: "pointer", fontSize: 18, padding: "0 2px", lineHeight: 1 }}>×</button>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Change 25: rename "Sesiones por día" to "Objetivo diario de estudio" */}
+            <h3 style={{ fontSize: 14, fontWeight: 700, margin: "0 0 12px", color: "#94a3b8" }}>Objetivo diario de estudio</h3>
+            <p style={{ fontSize: 10, color: '#334155', margin: '-8px 0 12px' }}>Sesiones planificadas en tu rutina</p>
             <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
               {DAY_FULL.map((dn, i) => {
                 const sess = getTotalSessions(dn);
@@ -545,7 +845,8 @@ export default function App() {
         )}
       </div>
 
-      <div style={{ position: "fixed", bottom: 16, left: 16, right: 16, background: "rgba(12,18,34,0.95)", backdropFilter: "blur(12px)", border: "1px solid rgba(255,255,255,0.08)", borderRadius: 20, display: "flex", justifyContent: "center", padding: "8px 0 10px" }}>
+      {/* Change 26: nav bar with iOS safe area */}
+      <div style={{ position: "fixed", bottom: 'max(16px, env(safe-area-inset-bottom, 16px))', left: 16, right: 16, background: "rgba(12,18,34,0.95)", backdropFilter: "blur(12px)", border: "1px solid rgba(255,255,255,0.08)", borderRadius: 20, display: "flex", justifyContent: "center", padding: "8px 0 10px", paddingBottom: 'env(safe-area-inset-bottom, 0px)' }}>
         <div style={{ display: "flex", gap: 0, maxWidth: 480, width: "100%" }}>
           {navItems.map(item => (<button key={item.id} onClick={() => setView(item.id)} style={{ flex: 1, background: "none", border: "none", cursor: "pointer", display: "flex", flexDirection: "column", alignItems: "center", gap: 2, padding: "4px 0" }}>
             <span style={{ fontSize: 20, opacity: view === item.id ? 1 : 0.4 }}>{item.icon}</span>

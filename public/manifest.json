@@ -1,16 +1,19 @@
 {
   "name": "Mi Rutina",
   "short_name": "Rutina",
-  "description": "Tracker de estudio - Ingeniería",
+  "description": "Tracker de estudio — Ingeniería",
   "start_url": "/",
+  "scope": "/",
   "display": "standalone",
+  "orientation": "portrait",
   "background_color": "#0c1222",
   "theme_color": "#0c1222",
   "icons": [
     {
-      "src": "data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📋</text></svg>",
+      "src": "data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' rx='20' fill='%230c1222'/><text y='.85em' font-size='72' x='14'>📋</text></svg>",
       "sizes": "any",
-      "type": "image/svg+xml"
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
     }
   ]
 }

@@ -217,14 +217,9 @@ export default function App() {
 
   const isChecked = (blockId) => data?.checked?.[todayKey()]?.[blockId] || false;
 
-  // Change 15: getDayProgress counts only study blocks
+  // getDayProgress uses session-based tracking (matches timer + checkbox)
   const getDayProgress = () => {
-    const studyBlocks = schedule[DAY_FULL[dayOfWeek()]].filter(b => b.cat === 'estudio');
-    const checkedToday = data?.checked?.[todayKey()] || {};
-    const done = studyBlocks.filter(b => checkedToday[b.id]).length;
-    const total = studyBlocks.length;
-    const pct = total > 0 ? Math.round((done / total) * 100) : 0;
-    return { done, total, pct };
+    return { done: todayD.completed, total: todayTarget, pct: studyPct };
   };
 
   const playBeep = useCallback(() => {
@@ -426,7 +421,12 @@ export default function App() {
   const parcialDatesSet = new Set((data.parciales || []).map(p => p.fecha));
 
   return (
-    // Change 26: safe area iOS paddingBottom
+    <>
+    <style>{`
+      @keyframes timerPulse { 0%,100% { opacity:0.1; } 50% { opacity:0.5; } }
+      @keyframes btnGlow { 0%,100% { box-shadow: 0 0 0 5px rgba(16,185,129,0.15), 0 8px 28px rgba(16,185,129,0.35); } 50% { box-shadow: 0 0 0 9px rgba(16,185,129,0.08), 0 8px 40px rgba(16,185,129,0.55); } }
+      @keyframes btnGlowPurple { 0%,100% { box-shadow: 0 0 0 5px rgba(139,92,246,0.15), 0 8px 28px rgba(139,92,246,0.35); } 50% { box-shadow: 0 0 0 9px rgba(139,92,246,0.08), 0 8px 40px rgba(139,92,246,0.55); } }
+    `}</style>
     <div style={{ fontFamily: "'DM Sans',sans-serif", background: "linear-gradient(150deg,#0c1222,#162032)", minHeight: "100vh", color: "#e2e8f0", paddingBottom: 'calc(96px + env(safe-area-inset-bottom, 0px))' }}>
 <div style={{ maxWidth: 480, margin: "0 auto", padding: "16px 14px" }}>
 
@@ -459,7 +459,7 @@ export default function App() {
             <h2 style={{ fontSize: 16, fontWeight: 700, margin: 0, color: "#f1f5f9" }}>
               {DAY_FULL[selDay]}{isToday && <span style={{ fontSize: 11, color: "#64748b", fontWeight: 500, marginLeft: 8 }}>hoy</span>}
             </h2>
-            {isToday && dayProgress && <span style={{ fontSize: 11, fontWeight: 600, color: dayProgress.pct >= 100 ? "#34d399" : "#94a3b8" }}>{dayProgress.done}/{dayProgress.total} hechos</span>}
+            {isToday && dayProgress && <span style={{ fontSize: 11, fontWeight: 600, color: dayProgress.pct >= 100 ? "#34d399" : "#94a3b8" }}>{dayProgress.done}/{dayProgress.total} sesiones</span>}
           </div>
 
           {isToday && dayProgress && (
@@ -545,27 +545,37 @@ export default function App() {
         </>)}
 
         {view === VIEW.TIMER && (
-          <div style={{ display: "flex", flexDirection: "column", alignItems: "center", paddingTop: 20 }}>
-            <p style={{ fontSize: 13, color: "#64748b", marginBottom: 4 }}>{todayDayName} — {todayTarget > 0 ? `${todayTarget} sesiones hoy` : "Sin estudio hoy"}</p>
-            <p style={{ fontSize: 12, color: timerPhase === "study" ? "#10b981" : "#a78bfa", fontWeight: 600, marginBottom: 16 }}>{timerPhase === "study" ? "🎯 Sesión de estudio (1:05)" : "☕ Descanso (10 min)"}</p>
+          <div style={{ display: "flex", flexDirection: "column", alignItems: "center", paddingTop: 12 }}>
 
-            {/* Change 20: timerNotif */}
+            {/* Phase badge */}
+            <div style={{
+              padding: '5px 16px', borderRadius: 20, marginBottom: 20,
+              background: timerPhase === "study" ? "rgba(16,185,129,0.12)" : "rgba(139,92,246,0.12)",
+              border: `1px solid ${timerPhase === "study" ? "rgba(16,185,129,0.35)" : "rgba(139,92,246,0.35)"}`,
+              fontSize: 11, fontWeight: 700, letterSpacing: '0.8px',
+              color: timerPhase === "study" ? "#10b981" : "#a78bfa",
+            }}>
+              {timerPhase === "study" ? "🎯 SESIÓN DE ESTUDIO · 1:05" : "☕ DESCANSO · 10:00"}
+            </div>
+
+            {/* Notification */}
             {timerNotif && (
-              <div style={{ padding: '6px 16px', borderRadius: 20, background: 'rgba(16,185,129,0.12)', border: '1px solid rgba(16,185,129,0.3)', color: '#34d399', fontSize: 12, fontWeight: 600, marginBottom: 12 }}>
+              <div style={{ padding: '6px 16px', borderRadius: 20, background: 'rgba(16,185,129,0.12)', border: '1px solid rgba(16,185,129,0.3)', color: '#34d399', fontSize: 12, fontWeight: 600, marginBottom: 14 }}>
                 {timerNotif}
               </div>
             )}
 
+            {/* Subject selection */}
             {timerPhase === "study" && (
               <div style={{ width: "100%", marginBottom: 20 }}>
-                <p style={{ fontSize: 11, color: "#475569", margin: "0 0 8px", textAlign: "center" }}>📖 Estudiando para</p>
-                <div style={{ display: "flex", gap: 6, flexWrap: "wrap", justifyContent: "center" }}>
+                <p style={{ fontSize: 10, color: "#475569", margin: "0 0 8px", textAlign: "center", letterSpacing: '0.5px', textTransform: 'uppercase' }}>Estudiando</p>
+                <div style={{ display: "flex", gap: 5, flexWrap: "wrap", justifyContent: "center" }}>
                   {SUBJECTS.map(s => (
                     <button key={s} onClick={() => setTimerSubject(s)} style={{
-                      padding: "5px 11px", borderRadius: 20,
-                      border: timerSubject === s ? "1px solid #3b82f6" : "1px solid rgba(255,255,255,0.1)",
-                      background: timerSubject === s ? "rgba(59,130,246,0.2)" : "rgba(255,255,255,0.04)",
-                      color: timerSubject === s ? "#60a5fa" : "#64748b",
+                      padding: "5px 12px", borderRadius: 20,
+                      border: timerSubject === s ? `1px solid ${timerPhase === "study" ? "#10b981" : "#8b5cf6"}` : "1px solid rgba(255,255,255,0.08)",
+                      background: timerSubject === s ? (timerPhase === "study" ? "rgba(16,185,129,0.18)" : "rgba(139,92,246,0.18)") : "rgba(255,255,255,0.03)",
+                      color: timerSubject === s ? (timerPhase === "study" ? "#34d399" : "#c4b5fd") : "#475569",
                       fontSize: 11, fontWeight: timerSubject === s ? 700 : 500,
                       cursor: "pointer", fontFamily: "'DM Sans',sans-serif", transition: "all 0.15s ease",
                     }}>{s}</button>
@@ -574,47 +584,127 @@ export default function App() {
               </div>
             )}
 
-            <div style={{ position: "relative", width: 220, height: 220, marginBottom: 24 }}>
-              <svg width="220" height="220" viewBox="0 0 220 220" style={{ transform: "rotate(-90deg)" }}>
-                <circle cx="110" cy="110" r="96" fill="none" stroke="rgba(255,255,255,0.05)" strokeWidth="8" />
-                <circle cx="110" cy="110" r="96" fill="none" stroke={timerPhase === "study" ? "#10b981" : "#8b5cf6"} strokeWidth="8" strokeLinecap="round" strokeDasharray={`${2 * Math.PI * 96}`} strokeDashoffset={`${2 * Math.PI * 96 * (1 - timerPct / 100)}`} style={{ transition: "stroke-dashoffset 0.5s ease" }} />
+            {/* Timer circle */}
+            <div style={{
+              position: "relative", width: 240, height: 240, marginBottom: 16,
+              filter: timerActive
+                ? `drop-shadow(0 0 28px ${timerPhase === "study" ? "rgba(16,185,129,0.5)" : "rgba(139,92,246,0.5)"})`
+                : 'none',
+              transition: 'filter 0.7s ease',
+            }}>
+              <svg width="240" height="240" viewBox="0 0 240 240" style={{ transform: "rotate(-90deg)" }}>
+                <circle cx="120" cy="120" r="100" fill="none" stroke="rgba(255,255,255,0.05)" strokeWidth="10" />
+                <circle cx="120" cy="120" r="100" fill="none"
+                  stroke={timerPhase === "study" ? "#10b981" : "#8b5cf6"}
+                  strokeWidth="10" strokeLinecap="round"
+                  strokeDasharray={`${2 * Math.PI * 100}`}
+                  strokeDashoffset={`${2 * Math.PI * 100 * (1 - timerPct / 100)}`}
+                  style={{ transition: "stroke-dashoffset 0.5s ease" }}
+                />
+                {timerActive && (
+                  <circle cx="120" cy="120" r="111" fill="none"
+                    stroke={timerPhase === "study" ? "#10b981" : "#8b5cf6"}
+                    strokeWidth="1.5"
+                    style={{ animation: 'timerPulse 2s ease-in-out infinite' }}
+                  />
+                )}
               </svg>
               <div style={{ position: "absolute", inset: 0, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center" }}>
-                <span style={{ fontFamily: "'DM Mono',monospace", fontSize: 44, fontWeight: 500, color: "#f1f5f9", letterSpacing: "-2px" }}>{fmtTimer(timerSecs)}</span>
-                <span style={{ fontSize: 11, color: "#475569", marginTop: 4 }}>{todayD.completed}/{todayTarget} completadas</span>
-                {timerPhase === "study" && <span style={{ fontSize: 10, color: "#3b82f6", marginTop: 2, fontWeight: 600 }}>{timerSubject}</span>}
+                <span style={{
+                  fontFamily: "'DM Mono',monospace", fontSize: 52, fontWeight: 500,
+                  color: "#f1f5f9", letterSpacing: "-3px", lineHeight: 1,
+                }}>{fmtTimer(timerSecs)}</span>
+                <span style={{ fontSize: 11, color: "#64748b", marginTop: 8 }}>
+                  {todayD.completed}/{todayTarget} sesiones hoy
+                </span>
+                {timerPhase === "study" && timerActive && (
+                  <span style={{ fontSize: 10, color: "#10b981", marginTop: 3, fontWeight: 700 }}>{timerSubject}</span>
+                )}
               </div>
             </div>
-            <div style={{ display: "flex", gap: 12, marginBottom: 24 }}>
-              <button onClick={resetTimer} style={{ width: 44, height: 44, borderRadius: "50%", border: "1px solid rgba(255,255,255,0.1)", background: "rgba(255,255,255,0.05)", color: "#94a3b8", fontSize: 18, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center" }}>↺</button>
-              <button onClick={toggleTimer} style={{ width: 64, height: 64, borderRadius: "50%", border: "none", background: timerActive ? "rgba(239,68,68,0.8)" : timerPhase === "study" ? "rgba(16,185,129,0.8)" : "rgba(139,92,246,0.8)", color: "#fff", fontSize: 22, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", boxShadow: timerActive ? "0 0 30px rgba(239,68,68,0.3)" : "0 0 30px rgba(16,185,129,0.3)" }}>{timerActive ? "❚❚" : "▶"}</button>
-              <button onClick={skipPhase} style={{ width: 44, height: 44, borderRadius: "50%", border: "1px solid rgba(255,255,255,0.1)", background: "rgba(255,255,255,0.05)", color: "#94a3b8", fontSize: 18, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center" }}>⏭</button>
-            </div>
-            <div style={{ width: "100%", maxWidth: 300 }}>
-              <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 6 }}>
-                <span style={{ fontSize: 12, color: "#64748b" }}>Progreso estudio</span>
-                <span style={{ fontSize: 12, fontWeight: 600, color: studyPct >= 100 ? "#34d399" : "#60a5fa" }}>{todayD.completed}/{todayTarget} sesiones</span>
+
+            {/* Session progress dots */}
+            {todayTarget > 0 && (
+              <div style={{ display: 'flex', gap: 7, marginBottom: 24, alignItems: 'center' }}>
+                {Array.from({ length: todayTarget }).map((_, i) => (
+                  <div key={i} style={{
+                    width: i < todayD.completed ? 10 : 8,
+                    height: i < todayD.completed ? 10 : 8,
+                    borderRadius: '50%',
+                    background: i < todayD.completed
+                      ? '#10b981'
+                      : i === todayD.completed && timerActive
+                        ? (timerPhase === "study" ? "rgba(16,185,129,0.35)" : "rgba(139,92,246,0.35)")
+                        : 'rgba(255,255,255,0.08)',
+                    border: i === todayD.completed && !timerActive ? '1px solid rgba(255,255,255,0.12)' : 'none',
+                    transition: 'all 0.3s ease',
+                    boxShadow: i < todayD.completed ? '0 0 6px rgba(16,185,129,0.5)' : 'none',
+                  }} />
+                ))}
               </div>
-              <div style={{ height: 8, borderRadius: 4, background: "rgba(255,255,255,0.06)" }}>
-                <div style={{ height: "100%", borderRadius: 4, width: `${studyPct}%`, background: studyPct >= 100 ? "#10b981" : "linear-gradient(90deg,#3b82f6,#60a5fa)", transition: "width 0.3s" }} />
-              </div>
+            )}
+
+            {/* Controls */}
+            <div style={{ display: "flex", gap: 16, alignItems: 'center', marginBottom: 28 }}>
+              <button onClick={resetTimer} style={{
+                width: 50, height: 50, borderRadius: "50%",
+                border: "1px solid rgba(255,255,255,0.1)",
+                background: "rgba(255,255,255,0.04)",
+                color: "#64748b", fontSize: 20, cursor: "pointer",
+                display: "flex", alignItems: "center", justifyContent: "center",
+                transition: 'all 0.2s',
+              }}>↺</button>
+              <button onClick={toggleTimer} style={{
+                width: 76, height: 76, borderRadius: "50%", border: "none",
+                background: timerActive
+                  ? "linear-gradient(135deg,#ef4444,#dc2626)"
+                  : timerPhase === "study"
+                    ? "linear-gradient(135deg,#10b981,#059669)"
+                    : "linear-gradient(135deg,#8b5cf6,#7c3aed)",
+                color: "#fff", fontSize: 28, cursor: "pointer",
+                display: "flex", alignItems: "center", justifyContent: "center",
+                boxShadow: timerActive
+                  ? "0 0 0 5px rgba(239,68,68,0.15), 0 8px 28px rgba(239,68,68,0.4)"
+                  : timerPhase === "study"
+                    ? undefined
+                    : undefined,
+                animation: !timerActive
+                  ? (timerPhase === "study" ? "btnGlow 3s ease-in-out infinite" : "btnGlowPurple 3s ease-in-out infinite")
+                  : "none",
+                transition: 'background 0.25s ease, box-shadow 0.25s ease',
+              }}>{timerActive ? "❚❚" : "▶"}</button>
+              <button onClick={skipPhase} style={{
+                width: 50, height: 50, borderRadius: "50%",
+                border: "1px solid rgba(255,255,255,0.1)",
+                background: "rgba(255,255,255,0.04)",
+                color: "#64748b", fontSize: 20, cursor: "pointer",
+                display: "flex", alignItems: "center", justifyContent: "center",
+              }}>⏭</button>
             </div>
-            {/* Change 19: "Marcar todo hoy" removed from Timer view */}
+
+            {/* Motivational message */}
+            <div style={{
+              padding: '10px 18px', borderRadius: 12, maxWidth: 280,
+              background: 'rgba(255,255,255,0.02)',
+              border: '1px solid rgba(255,255,255,0.05)',
+              fontSize: 12, color: '#475569', textAlign: 'center', lineHeight: 1.55,
+            }}>
+              {timerPhase === "study"
+                ? timerActive
+                  ? "Modo focus activado. Sin distracciones. 🔒"
+                  : todayD.completed === 0
+                    ? "¡Arrancá tu primera sesión del día! 💪"
+                    : `${todayD.completed} sesión${todayD.completed !== 1 ? 'es' : ''} completada${todayD.completed !== 1 ? 's' : ''}. ¡Seguí! 🚀`
+                : "Aléjate de la pantalla. Tomá agua. Respirá. ☀️"
+              }
+            </div>
           </div>
         )}
 
         {view === VIEW.STATS && (
           <div style={{ paddingTop: 8 }}>
 
-            {/* Change 21: weekly summary card */}
-            {weekSessionsTotal > 0 && (
-              <div style={{ background: 'rgba(59,130,246,0.06)', border: '1px solid rgba(59,130,246,0.15)', borderRadius: 10, padding: '10px 14px', marginBottom: 16, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                <span style={{ fontSize: 12, color: '#94a3b8' }}>Esta semana</span>
-                <span style={{ fontSize: 12, fontWeight: 700, color: '#60a5fa' }}>{weekDaysStudied} días · {weekSessionsTotal} sesiones</span>
-              </div>
-            )}
-
-            {/* Change 22: KPI cards — streak card shows bestStreak */}
+            {/* KPI cards */}
             <div style={{ display: "flex", gap: 8, marginBottom: 20 }}>
               <div style={{ flex: 1, background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.06)", borderRadius: 12, padding: "14px 10px", textAlign: "center" }}>
                 <div style={{ fontSize: 20, marginBottom: 4 }}>🔥</div>
@@ -632,6 +722,90 @@ export default function App() {
                 <div style={{ fontSize: 22, fontWeight: 700, color: studyPct >= 100 ? "#10b981" : "#60a5fa", fontFamily: "'DM Mono',monospace" }}>{studyPct}%</div>
                 <div style={{ fontSize: 10, color: "#475569", marginTop: 2 }}>estudio hoy</div>
               </div>
+            </div>
+
+            {/* Heatmap mensual */}
+            <h3 style={{ fontSize: 14, fontWeight: 700, margin: "0 0 12px", color: "#94a3b8" }}>Actividad — {MONTH_NAMES[heatMonth]}</h3>
+            <div style={{ background: "rgba(255,255,255,0.02)", border: "1px solid rgba(255,255,255,0.05)", borderRadius: 12, padding: "14px 12px", marginBottom: 24 }}>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(7,1fr)", gap: 3, marginBottom: 4 }}>
+                {["D","L","M","X","J","V","S"].map(d => (
+                  <div key={d} style={{ textAlign: "center", fontSize: 9, color: "#334155", paddingBottom: 2 }}>{d}</div>
+                ))}
+              </div>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(7,1fr)", gap: 3 }}>
+                {Array.from({ length: firstDayOfMonth }).map((_, i) => <div key={`e${i}`} />)}
+                {Array.from({ length: daysInMonth }).map((_, i) => {
+                  const day = i + 1;
+                  const mm = String(heatMonth + 1).padStart(2, "0");
+                  const dd = String(day).padStart(2, "0");
+                  const dateKey = `${heatYear}-${mm}-${dd}`;
+                  const cellDate = new Date(heatYear, heatMonth, day);
+                  const isFuture = cellDate > now;
+                  const isTodayCell = dateKey === todayKey();
+                  const dayIdx = cellDate.getDay();
+                  const target = getTotalSessions(DAY_FULL[dayIdx]);
+                  const completed = data.days?.[dateKey]?.completed || 0;
+                  const pct = target > 0 ? Math.min(100, Math.round((completed / target) * 100)) : (completed > 0 ? 100 : 0);
+                  const hasParcial = parcialDatesSet.has(dateKey);
+
+                  let bg;
+                  if (isFuture) bg = "rgba(255,255,255,0.02)";
+                  else if (target === 0 && completed === 0) bg = "rgba(255,255,255,0.05)";
+                  else if (pct === 0) bg = "rgba(255,255,255,0.07)";
+                  else if (pct < 50) bg = "rgba(16,185,129,0.28)";
+                  else if (pct < 100) bg = "rgba(16,185,129,0.58)";
+                  else bg = "#10b981";
+
+                  return (
+                    <div key={day} title={`${day}/${heatMonth + 1}${hasParcial ? " 📝 Parcial" : ""}${!isFuture ? `: ${completed}/${target} sesiones` : ""}`} style={{
+                      aspectRatio: "1", borderRadius: 3, background: bg,
+                      border: isTodayCell ? "1px solid #60a5fa" : "1px solid transparent",
+                      position: "relative",
+                    }}>
+                      {isTodayCell && <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 7, color: "rgba(255,255,255,0.6)", fontWeight: 700 }}>{day}</div>}
+                      {hasParcial && (
+                        <div style={{ position: 'absolute', top: 1, right: 1, width: 3, height: 3, borderRadius: '50%', background: '#f59e0b' }} />
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+              <div style={{ display: "flex", alignItems: "center", gap: 5, marginTop: 10, justifyContent: "space-between" }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                  <div style={{ width: 6, height: 6, borderRadius: '50%', background: '#f59e0b' }} />
+                  <span style={{ fontSize: 9, color: "#334155" }}>parcial</span>
+                </div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+                  <span style={{ fontSize: 9, color: "#334155" }}>menos</span>
+                  {["rgba(255,255,255,0.07)","rgba(16,185,129,0.28)","rgba(16,185,129,0.58)","#10b981"].map((c, i) => (
+                    <div key={i} style={{ width: 11, height: 11, borderRadius: 2, background: c }} />
+                  ))}
+                  <span style={{ fontSize: 9, color: "#334155" }}>más</span>
+                </div>
+              </div>
+            </div>
+
+            {/* Últimos 7 días */}
+            <h3 style={{ fontSize: 14, fontWeight: 700, margin: "0 0 12px", color: "#94a3b8" }}>Últimos 7 días</h3>
+            <div style={{ display: "flex", gap: 6, marginBottom: 24 }}>
+              {[...last7].reverse().map(({ key, dayIdx, date, month }, i) => {
+                const target = getTotalSessions(DAY_FULL[dayIdx]);
+                const completed = data.days?.[key]?.completed || 0;
+                const pct = target > 0 ? Math.min(100, Math.round((completed / target) * 100)) : (completed > 0 ? 100 : 0);
+                const isTodayDot = key === todayKey();
+                return (
+                  <div key={i} style={{ flex: 1, textAlign: "center", padding: "8px 0", background: isTodayDot ? "rgba(96,165,250,0.08)" : "transparent", borderRadius: 8, border: isTodayDot ? "1px solid rgba(96,165,250,0.2)" : "1px solid transparent" }}>
+                    <div style={{ fontSize: 10, color: "#475569", marginBottom: 6 }}>{DAYS[dayIdx]}</div>
+                    <div style={{ width: 28, height: 28, borderRadius: "50%", margin: "0 auto 4px", display: "flex", alignItems: "center", justifyContent: "center", background: pct >= 100 ? "rgba(16,185,129,0.2)" : pct > 0 ? "rgba(59,130,246,0.15)" : "rgba(255,255,255,0.04)", border: `2px solid ${pct >= 100 ? "#10b981" : pct > 0 ? "#3b82f6" : "transparent"}`, fontSize: 11, fontWeight: 700, color: pct >= 100 ? "#34d399" : pct > 0 ? "#60a5fa" : "#334155" }}>
+                      {pct >= 100 ? "✓" : target === 0 ? "—" : pct > 0 ? pct : "·"}
+                    </div>
+                    <div style={{ fontSize: 9, color: "#334155" }}>{date}/{month + 1}</div>
+                    {!isTodayDot && target > 0 && (
+                      <div onClick={() => addPastSession(key, dayIdx)} style={{ fontSize: 10, color: "#475569", cursor: "pointer", marginTop: 3, lineHeight: 1 }} title="Agregar sesión">+</div>
+                    )}
+                  </div>
+                );
+              })}
             </div>
 
             {/* Materias esta semana */}
@@ -657,106 +831,18 @@ export default function App() {
               )}
             </div>
 
-            {/* Últimos 7 días — uses unified last7 array */}
-            <h3 style={{ fontSize: 14, fontWeight: 700, margin: "0 0 12px", color: "#94a3b8" }}>Últimos 7 días</h3>
-            <div style={{ display: "flex", gap: 6, marginBottom: 24 }}>
-              {[...last7].reverse().map(({ key, dayIdx, date, month }, i) => {
-                const target = getTotalSessions(DAY_FULL[dayIdx]);
-                const completed = data.days?.[key]?.completed || 0;
-                const pct = target > 0 ? Math.min(100, Math.round((completed / target) * 100)) : (completed > 0 ? 100 : 0);
-                const isTodayDot = key === todayKey();
-                return (<div key={i} style={{ flex: 1, textAlign: "center", padding: "8px 0", background: isTodayDot ? "rgba(96,165,250,0.08)" : "transparent", borderRadius: 8, border: isTodayDot ? "1px solid rgba(96,165,250,0.2)" : "1px solid transparent" }}>
-                  <div style={{ fontSize: 10, color: "#475569", marginBottom: 6 }}>{DAYS[dayIdx]}</div>
-                  <div style={{ width: 28, height: 28, borderRadius: "50%", margin: "0 auto 4px", display: "flex", alignItems: "center", justifyContent: "center", background: pct >= 100 ? "rgba(16,185,129,0.2)" : pct > 0 ? "rgba(59,130,246,0.15)" : "rgba(255,255,255,0.04)", border: `2px solid ${pct >= 100 ? "#10b981" : pct > 0 ? "#3b82f6" : "transparent"}`, fontSize: 11, fontWeight: 700, color: pct >= 100 ? "#34d399" : pct > 0 ? "#60a5fa" : "#334155" }}>
-                    {pct >= 100 ? "✓" : target === 0 ? "—" : pct > 0 ? pct : "·"}
-                  </div>
-                  <div style={{ fontSize: 9, color: "#334155" }}>{date}/{month + 1}</div>
-                  {!isTodayDot && target > 0 && (
-                    <div onClick={() => addPastSession(key, dayIdx)} style={{ fontSize: 10, color: "#475569", cursor: "pointer", marginTop: 3, lineHeight: 1 }} title="Agregar sesión">+</div>
-                  )}
-                </div>);
-              })}
-            </div>
-
-            {/* Change 23: Heatmap mensual con marcadores de parciales */}
-            <h3 style={{ fontSize: 14, fontWeight: 700, margin: "0 0 12px", color: "#94a3b8" }}>Actividad — {MONTH_NAMES[heatMonth]}</h3>
-            <div style={{ background: "rgba(255,255,255,0.02)", border: "1px solid rgba(255,255,255,0.05)", borderRadius: 12, padding: "14px 12px", marginBottom: 24 }}>
-              <div style={{ display: "grid", gridTemplateColumns: "repeat(7,1fr)", gap: 3, marginBottom: 4 }}>
-                {["D","L","M","X","J","V","S"].map(d => (
-                  <div key={d} style={{ textAlign: "center", fontSize: 9, color: "#334155", paddingBottom: 2 }}>{d}</div>
-                ))}
-              </div>
-              <div style={{ display: "grid", gridTemplateColumns: "repeat(7,1fr)", gap: 3 }}>
-                {Array.from({ length: firstDayOfMonth }).map((_, i) => (
-                  <div key={`e${i}`} />
-                ))}
-                {Array.from({ length: daysInMonth }).map((_, i) => {
-                  const day = i + 1;
-                  const mm = String(heatMonth + 1).padStart(2, "0");
-                  const dd = String(day).padStart(2, "0");
-                  const dateKey = `${heatYear}-${mm}-${dd}`;
-                  const cellDate = new Date(heatYear, heatMonth, day);
-                  const isFuture = cellDate > now;
-                  const isTodayCell = dateKey === todayKey();
-                  const dayIdx = cellDate.getDay();
-                  const target = getTotalSessions(DAY_FULL[dayIdx]);
-                  const completed = data.days?.[dateKey]?.completed || 0;
-                  const pct = target > 0 ? Math.min(100, Math.round((completed / target) * 100)) : (completed > 0 ? 100 : 0);
-
-                  let bg;
-                  if (isFuture) bg = "rgba(255,255,255,0.02)";
-                  else if (target === 0 && completed === 0) bg = "rgba(255,255,255,0.05)";
-                  else if (pct === 0) bg = "rgba(255,255,255,0.07)";
-                  else if (pct < 50) bg = "rgba(16,185,129,0.28)";
-                  else if (pct < 100) bg = "rgba(16,185,129,0.58)";
-                  else bg = "#10b981";
-
-                  return (
-                    <div key={day} title={isFuture ? "" : `${day}/${heatMonth + 1}: ${completed}/${target} sesiones`} style={{
-                      aspectRatio: "1", borderRadius: 3,
-                      background: bg,
-                      border: isTodayCell ? "1px solid #60a5fa" : "1px solid transparent",
-                      position: "relative",
-                    }}>
-                      {isTodayCell && <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 7, color: "rgba(255,255,255,0.6)", fontWeight: 700 }}>{day}</div>}
-                      {/* Change 23: parcial marker dot */}
-                      {parcialDatesSet.has(dateKey) && !isFuture && (
-                        <div style={{ position: 'absolute', top: 1, right: 1, width: 3, height: 3, borderRadius: '50%', background: '#f59e0b' }} />
-                      )}
-                    </div>
-                  );
-                })}
-              </div>
-              <div style={{ display: "flex", alignItems: "center", gap: 5, marginTop: 10, justifyContent: "flex-end" }}>
-                <span style={{ fontSize: 9, color: "#334155" }}>menos</span>
-                {["rgba(255,255,255,0.07)","rgba(16,185,129,0.28)","rgba(16,185,129,0.58)","#10b981"].map((c, i) => (
-                  <div key={i} style={{ width: 11, height: 11, borderRadius: 2, background: c }} />
-                ))}
-                <span style={{ fontSize: 9, color: "#334155" }}>más</span>
-              </div>
-            </div>
-
-            {/* Change 24: Parciales split into upcoming and past */}
+            {/* Parciales */}
             <h3 style={{ fontSize: 14, fontWeight: 700, margin: "0 0 12px", color: "#94a3b8" }}>Parciales</h3>
             <div style={{ display: "flex", gap: 6, marginBottom: 10 }}>
-              <select
-                value={parcialesForm.materia}
-                onChange={e => setParcialesForm(f => ({ ...f, materia: e.target.value }))}
-                style={{ flex: 1, background: "rgba(255,255,255,0.06)", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 8, color: "#e2e8f0", fontSize: 12, padding: "8px 10px", fontFamily: "'DM Sans',sans-serif", cursor: "pointer", outline: "none" }}
-              >
+              <select value={parcialesForm.materia} onChange={e => setParcialesForm(f => ({ ...f, materia: e.target.value }))} style={{ flex: 1, background: "rgba(255,255,255,0.06)", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 8, color: "#e2e8f0", fontSize: 12, padding: "8px 10px", fontFamily: "'DM Sans',sans-serif", cursor: "pointer", outline: "none" }}>
                 {SUBJECTS.map(s => <option key={s} value={s} style={{ background: "#0f1923" }}>{s}</option>)}
               </select>
-              <input
-                type="date"
-                value={parcialesForm.fecha}
-                onChange={e => setParcialesForm(f => ({ ...f, fecha: e.target.value }))}
-                style={{ flex: 1, background: "rgba(255,255,255,0.06)", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 8, color: "#e2e8f0", fontSize: 12, padding: "8px 10px", fontFamily: "'DM Sans',sans-serif", colorScheme: "dark", outline: "none" }}
-              />
+              <input type="date" value={parcialesForm.fecha} onChange={e => setParcialesForm(f => ({ ...f, fecha: e.target.value }))} style={{ flex: 1, background: "rgba(255,255,255,0.06)", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 8, color: "#e2e8f0", fontSize: 12, padding: "8px 10px", fontFamily: "'DM Sans',sans-serif", colorScheme: "dark", outline: "none" }} />
               <button onClick={addParcial} style={{ padding: "8px 14px", borderRadius: 8, border: "none", background: "#3b82f6", color: "#fff", fontSize: 16, fontWeight: 700, cursor: "pointer", flexShrink: 0 }}>+</button>
             </div>
 
             {upcomingParciales.length === 0 && pastParciales.length === 0 ? (
-              <p style={{ fontSize: 12, color: "#334155", textAlign: "center", marginBottom: 24, marginTop: 8 }}>Sin parciales cargados</p>
+              <p style={{ fontSize: 12, color: "#334155", textAlign: "center", marginBottom: 16, marginTop: 8 }}>Sin parciales cargados</p>
             ) : (
               <div style={{ display: "flex", flexDirection: "column", gap: 7, marginBottom: 16 }}>
                 {upcomingParciales.map((p) => {
@@ -768,7 +854,6 @@ export default function App() {
                   const bg = isUrgent ? "rgba(239,68,68,0.08)" : isWarning ? "rgba(245,158,11,0.08)" : "rgba(16,185,129,0.06)";
                   const border = isUrgent ? "rgba(239,68,68,0.25)" : isWarning ? "rgba(245,158,11,0.25)" : "rgba(16,185,129,0.18)";
                   const dateLabel = examDate.toLocaleDateString("es-AR", { day: "numeric", month: "long" });
-                  // Use original index for removal
                   const origIdx = data.parciales.findIndex(orig => orig.materia === p.materia && orig.fecha === p.fecha);
                   return (
                     <div key={`${p.materia}-${p.fecha}`} style={{ display: "flex", alignItems: "center", gap: 10, background: bg, border: `1px solid ${border}`, borderRadius: 10, padding: "10px 12px" }}>
@@ -778,10 +863,7 @@ export default function App() {
                       </div>
                       <div style={{ textAlign: "right", minWidth: 44 }}>
                         {daysLeft > 0 ? (
-                          <>
-                            <div style={{ fontSize: 22, fontWeight: 700, color, fontFamily: "'DM Mono',monospace", lineHeight: 1 }}>{daysLeft}</div>
-                            <div style={{ fontSize: 9, color: "#64748b" }}>días</div>
-                          </>
+                          <><div style={{ fontSize: 22, fontWeight: 700, color, fontFamily: "'DM Mono',monospace", lineHeight: 1 }}>{daysLeft}</div><div style={{ fontSize: 9, color: "#64748b" }}>días</div></>
                         ) : (
                           <div style={{ fontSize: 11, fontWeight: 700, color: "#ef4444" }}>hoy</div>
                         )}
@@ -793,7 +875,6 @@ export default function App() {
               </div>
             )}
 
-            {/* Change 24: past parciales toggle */}
             {pastParciales.length > 0 && (
               <div style={{ marginBottom: 24 }}>
                 <button onClick={() => setShowPastParciales(p => !p)} style={{ width: '100%', padding: '7px 12px', borderRadius: 8, border: '1px solid rgba(255,255,255,0.06)', background: 'rgba(255,255,255,0.02)', color: '#475569', fontSize: 11, cursor: 'pointer', fontFamily: "'DM Sans',sans-serif", textAlign: 'left' }}>
@@ -823,24 +904,7 @@ export default function App() {
               </div>
             )}
 
-            {/* Change 25: rename "Sesiones por día" to "Objetivo diario de estudio" */}
-            <h3 style={{ fontSize: 14, fontWeight: 700, margin: "0 0 12px", color: "#94a3b8" }}>Objetivo diario de estudio</h3>
-            <p style={{ fontSize: 10, color: '#334155', margin: '-8px 0 12px' }}>Sesiones planificadas en tu rutina</p>
-            <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-              {DAY_FULL.map((dn, i) => {
-                const sess = getTotalSessions(dn);
-                return (<div key={dn} style={{ display: "flex", alignItems: "center", gap: 10 }}>
-                  <span style={{ width: 30, fontSize: 11, color: "#64748b", textAlign: "right" }}>{DAYS[i]}</span>
-                  <div style={{ flex: 1, height: 22, background: "rgba(255,255,255,0.04)", borderRadius: 5, overflow: "hidden" }}>
-                    <div style={{ height: "100%", borderRadius: 5, width: `${(sess / 5) * 100}%`, background: sess === 0 ? "rgba(255,255,255,0.06)" : "linear-gradient(90deg,#10b981,#34d399)", display: "flex", alignItems: "center", paddingLeft: 8 }}>
-                      {sess > 0 && <span style={{ fontSize: 10, fontWeight: 600, color: "#fff" }}>{sess} × 1:05</span>}
-                    </div>
-                  </div>
-                  <span style={{ width: 40, fontSize: 10, color: "#475569", textAlign: "right" }}>{sess > 0 ? fmtHrs(sess * STUDY_ON / 60) : "—"}</span>
-                </div>);
-              })}
-            </div>
-            <button onClick={() => { if (window.confirm("¿Borrar todos los datos?")) { persist({ ...DEFAULT_DATA }); } }} style={{ marginTop: 28, padding: "8px 16px", borderRadius: 8, border: "1px solid rgba(239,68,68,0.2)", background: "transparent", color: "#64748b", fontSize: 11, cursor: "pointer", fontFamily: "'DM Sans',sans-serif" }}>Resetear datos</button>
+            <button onClick={() => { if (window.confirm("¿Borrar todos los datos?")) { persist({ ...DEFAULT_DATA }); } }} style={{ marginTop: 8, marginBottom: 8, padding: "8px 16px", borderRadius: 8, border: "1px solid rgba(239,68,68,0.2)", background: "transparent", color: "#64748b", fontSize: 11, cursor: "pointer", fontFamily: "'DM Sans',sans-serif" }}>Resetear datos</button>
           </div>
         )}
       </div>
@@ -855,5 +919,6 @@ export default function App() {
         </div>
       </div>
     </div>
+    </>
   );
 }
